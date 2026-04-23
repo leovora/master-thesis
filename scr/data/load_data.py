@@ -1,7 +1,8 @@
 import os
+import time
 import numpy as np
 import pandas as pd
-from yahoo_fin import stock_info as si
+import yfinance as yf
 from typing import Tuple
 
 FEATURES = ['high', 'low', 'open', 'close', 'volume']
@@ -11,7 +12,8 @@ def load_ticker_data(ticker: str, start_date: str, end_date: str) -> pd.DataFram
     Fetch data for a given ticker from Yahoo Finance.
     """
     try:
-        df = si.get_data(ticker, start_date=start_date, end_date=end_date)
+        df = yf.download(ticker, start=start_date, end=end_date)
+        time.sleep(1.2)
         return df
     except Exception as e:
         print(f"Error fetching data for {ticker}: {e}")

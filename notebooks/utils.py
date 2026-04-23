@@ -1,8 +1,9 @@
 import os
+import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from yahoo_fin import stock_info as si
+import yfinance as yf
 from keras.models import Sequential
 from keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
@@ -34,7 +35,29 @@ def partition_dataset(sequence_length: int, data: np.ndarray) -> np.ndarray:
     return np.array(sequences)
 
 def preprocess_data(ticker, start_date, end_date, sequence_length):
-    df = si.get_data(ticker, start_date=start_date, end_date=end_date)
+
+    df = safe_download(ticker, start_date, end_date, retries=3)
+    
+    if df is None or df.empty:
+        print(f"[SKIP] No data for {ticker}")
+        return None
+    
+    # Normalize yfinance download to yahoo_fin format
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df.columns = df.columns.str.lower()
+
+    required_cols = ['open', 'high', 'low', 'close', 'volume']
+
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+
+    df = df[required_cols]
+    
+    print("DF shape:", df.shape)
+    print(df.head())
 
     data_filtered = df[FEATURES]
     X = data_filtered.values
@@ -62,6 +85,14 @@ def preprocess_data(ticker, start_date, end_date, sequence_length):
 
     return X_train, y_train, X_test, y_test, y_min, y_max, x_min, x_max
 
+def safe_download(ticker, start, end, retries=3):
+    for i in range(retries):
+        df = yf.download(ticker, start=start, end=end, progress=False)
+        if df is not None and not df.empty:
+            return df
+        time.sleep(1)
+    return None
+
 def get_predictions(tickers, start_date, end_date, sequence_length, folder_path="models"):
     predictions = {}
 
@@ -77,7 +108,12 @@ def get_predictions(tickers, start_date, end_date, sequence_length, folder_path=
 
         model = load_model(model_path)
 
-        X_train, y_train, X_test, y_test, y_min, y_max, x_min, x_max = preprocess_data(ticker, start_date, end_date, sequence_length)
+        result = preprocess_data(ticker, start_date, end_date, sequence_length)
+        
+        if result is None:
+            continue
+        
+        X_train, y_train, X_test, y_test, y_min, y_max, x_min, x_max = result
 
         y_pred = model.predict(X_test)
         y_pred_rescaled = y_pred * (y_max - y_min) + y_min
@@ -224,7 +260,8 @@ def plot_average_predictions(predictions: dict, actuals: dict):
     plt.savefig('plots/baseline/average_predictions.pdf', dpi=300)
     plt.show()
 
-predictions, actuals = get_predictions(tickers, start_date, end_date, sequence_length, folder_path='models')
+if __name__ == "__main__":
+    predictions, actuals = get_predictions(tickers, start_date, end_date, sequence_length, folder_path='models')
 
     
 def perform_ephemeral_attack(ticker, start_date, end_date, sequence_length, days_to_attack, window_size=30, folder_path="models"):
