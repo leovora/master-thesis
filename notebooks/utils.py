@@ -36,9 +36,18 @@ def partition_dataset(sequence_length: int, data: np.ndarray) -> np.ndarray:
         sequences.append(data[i-sequence_length:i])
     return np.array(sequences)
 
-def preprocess_data(ticker, start_date, end_date, sequence_length):
+def preprocess_data(ticker, start_date, end_date, sequence_length, source="yfinance", data_folder="../data"):
 
-    df = safe_download(ticker, start_date, end_date, retries=3)
+    if source == "yfinance":
+        df = safe_download(ticker, start_date, end_date, retries=3)
+    elif source == "csv":
+        csv_path = os.path.join(data_folder, "stock_data", f"{ticker}_data.csv")
+        if not os.path.exists(csv_path):
+            print(f"[SKIP] No CSV data for {ticker}: {csv_path}")
+            return None
+        df = pd.read_csv(csv_path)
+    else:
+        raise ValueError(f"Unknown data source: {source}")
     
     if df is None or df.empty:
         print(f"[SKIP] No data for {ticker}")
@@ -443,6 +452,5 @@ def plot_cumulative_returns_after_attack_day(tickers, start_date, end_date, sequ
 
     # Plot the cumulative returns for all windows
     plot_cumulative_returns_after_attack(pre_attack_returns, after_returns_for_all_windows, window_sizes, attack_day)
-
 
 
