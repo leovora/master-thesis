@@ -1,4 +1,6 @@
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 import time
 import numpy as np
 import pandas as pd
@@ -56,8 +58,8 @@ def preprocess_data(ticker, start_date, end_date, sequence_length):
 
     df = df[required_cols]
     
-    print("DF shape:", df.shape)
-    print(df.head())
+    #print("DF shape:", df.shape)
+    #print(df.head())
 
     data_filtered = df[FEATURES]
     X = data_filtered.values
@@ -290,7 +292,7 @@ def perform_ephemeral_attack(ticker, start_date, end_date, sequence_length, days
 
 def ephemeral_attacks(tickers, start_date, end_date, sequence_length, attack_days, window_size=30):
     # Get predictions and actuals
-    predictions, actuals = get_predictions(tickers, start_date, end_date, sequence_length)
+    #predictions, actuals = get_predictions(tickers, start_date, end_date, sequence_length)
 
     # Generate trading signals
     predictions, actuals = get_predictions(tickers, start_date, end_date, sequence_length, folder_path='models')
