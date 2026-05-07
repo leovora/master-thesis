@@ -393,6 +393,7 @@ def select_attack_days_by_policy(setup, policy, model_folders, project_root, n_d
         "high_volatility": ("actual_volatility", False),
         "high_pred_volatility": ("prediction_volatility", False),
         "strong_trend": ("abs_trend", False),
+        "weak_trend": ("abs_trend", True),
         "near_strategy_boundary": ("strategy_boundary_distance", True),
     }
     if policy not in score_columns:
