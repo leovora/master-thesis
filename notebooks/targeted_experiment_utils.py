@@ -193,6 +193,7 @@ def evaluate_targeted_attack(setup, attack_day, target_signal, model_folders, pr
     baseline_returns = simulate_trades_with_allocation(predictions_base, actuals, signals_base)
     baseline_final_cr = final_cumulative_return(baseline_returns)
 
+    # Get original data from attacked ticker
     data = get_ticker_data(setup.attacked_ticker, sequence_length, project_root)
     X_original = data["X_test"]
     baseline_attacked_pred = predictions_base[setup.attacked_ticker]
@@ -208,6 +209,7 @@ def evaluate_targeted_attack(setup, attack_day, target_signal, model_folders, pr
 
         attacked_pred = predict_ticker(setup.attacked_ticker, mf, sequence_length, project_root, X_override=attacked_X)
 
+        # Replace the target ticker's baseline predictions with adversarial ones
         predictions_attack = {t: v.copy() for t, v in predictions_base.items()}
         predictions_attack[setup.attacked_ticker] = attacked_pred[: len(baseline_attacked_pred)]
 
