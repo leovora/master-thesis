@@ -11,12 +11,12 @@ from tensorflow.keras.models import load_model
 
 sys.path.append(str(Path(__file__).resolve().parent / "scr"))
 
-from trade.trading_strategy import (
+from scr.trade.trading_strategy import (
     moving_average_strategy,
     rate_of_change_strategy,
     rolling_std_deviation_strategy,
 )
-from trade.backtest import simulate_trades_with_allocation
+from scr.trade.backtest import simulate_trades_with_allocation
 from notebooks.utils import calculate_cumulative_returns, preprocess_data
 
 FEATURES = ["high", "low", "open", "close", "volume"]
