@@ -17,7 +17,7 @@ from trade.trading_strategy import (
     rolling_std_deviation_strategy,
 )
 from trade.backtest import simulate_trades_with_allocation
-from utils import calculate_cumulative_returns, preprocess_data
+from notebooks.utils import calculate_cumulative_returns, preprocess_data
 
 FEATURES = ["high", "low", "open", "close", "volume"]
 CLOSE_FEATURE_INDEX = FEATURES.index("close")

@@ -13,8 +13,8 @@ from datetime import date
 import keras
 from typing import Tuple
 from keras.models import load_model
-from trade.backtest import simulate_trades_with_allocation
-from trade.trading_strategy import moving_average_strategy
+from scr.trade.backtest import simulate_trades_with_allocation
+from scr.trade.trading_strategy import moving_average_strategy
 
 
 FEATURES = ['high', 'low', 'open', 'close', 'volume']
@@ -147,7 +147,7 @@ def daily_sharpe_ratio(returns, risk_free_rate_annual=0.0505, trading_days=252):
     excess_returns = returns - risk_free_rate_daily
     return np.mean(excess_returns) / np.std(excess_returns) * np.sqrt(trading_days)
 
-def plot_dynamic_sharpe_ratio(returns, risk_free_rate=0.0505, trading_days=252):
+def plot_dynamic_sharpe_ratio(returns, risk_free_rate=0.0505, trading_days=252, folder='plots/baseline'):
     rolling_sharpe = []
     for i in range(1, len(returns) + 1):
         temp_returns = returns[:i]
@@ -165,12 +165,12 @@ def plot_dynamic_sharpe_ratio(returns, risk_free_rate=0.0505, trading_days=252):
     plt.xticks(fontsize=20)  
     plt.yticks(fontsize=20)  
     plt.legend(fontsize=50)  
-    filename = "sharpe_ratio_baseline.pdf"
-    plt.savefig('plots/baseline/sharpe_ratio_baseline.pdf', dpi=300) 
+    filename = folder / "sharpe_ratio_baseline.pdf"
+    plt.savefig(filename, dpi=300) 
     plt.show()
 
     
-def plot_daily_returns(portfolio_returns):
+def plot_daily_returns(portfolio_returns, folder='plots/baseline'):
    
     returns_series = pd.Series(portfolio_returns)
 
@@ -184,8 +184,8 @@ def plot_daily_returns(portfolio_returns):
     plt.xlim(0, 700) 
     plt.grid(True)  
     plt.tight_layout()  
-    filename = "daily_returns.pdf"
-    plt.savefig('plots/baseline/daily_returns.pdf', dpi=300)  
+    filename = folder / "daily_returns.pdf"
+    plt.savefig(filename, dpi=300)  
     plt.show()
 
     
@@ -198,7 +198,7 @@ def calculate_cumulative_returns(returns):
     cumulative_returns = np.cumprod(adjusted_returns) - 1
     return cumulative_returns
 
-def plot_cumulative_returns_baseline(portfolio_returns):
+def plot_cumulative_returns_baseline(portfolio_returns, folder='plots/baseline'):
     plt.figure(figsize=(14, 8))
     
     baseline_cumulative_returns = calculate_cumulative_returns(portfolio_returns)
@@ -213,15 +213,15 @@ def plot_cumulative_returns_baseline(portfolio_returns):
     plt.grid(True)
     plt.tight_layout()
     
-    filename = "cumulative_returns_baseline.pdf"
-    plt.savefig('plots/baseline/cumulative_returns_baseline.pdf', dpi=300)
+    filename = folder / "cumulative_returns_baseline.pdf"
+    plt.savefig(filename, dpi=300)
     plt.show()   
     
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-def plot_average_predictions(predictions: dict, actuals: dict):
+def plot_average_predictions(predictions: dict, actuals: dict, folder='plots/baseline'):
     """
     Plots the average predictions and actual values for all stocks and saves the plot.
 
@@ -268,7 +268,8 @@ def plot_average_predictions(predictions: dict, actuals: dict):
     plt.xticks(fontsize=16)
     plt.yticks(fontsize=16)
 
-    plt.savefig('plots/baseline/average_predictions.pdf', dpi=300)
+    filename = folder / 'average_predictions.pdf'
+    plt.savefig(filename, dpi=300)
     plt.show()
 
 if __name__ == "__main__":
@@ -401,7 +402,7 @@ def plot_and_save_attack_model(ticker, start_date, end_date, sequence_length, at
     
 
 
-def plot_cumulative_returns_after_attack(before_returns, after_returns_list, window_sizes, attack_day):
+def plot_cumulative_returns_after_attack(before_returns, after_returns_list, window_sizes, attack_day, folder='plots/attack_plots'):
     plt.figure(figsize=(14, 8))
     
     # Loop through each window size and calculate/plot cumulative returns after the attack
@@ -426,7 +427,7 @@ def plot_cumulative_returns_after_attack(before_returns, after_returns_list, win
     plt.grid(True)
     plt.tight_layout()
     
-    plot_dir = "plots/attack_plots"
+    plot_dir = folder
     os.makedirs(plot_dir, exist_ok=True)
     
     filename = os.path.join(plot_dir, f"cumulative_returns_after_attack_day_{attack_day}.pdf")
