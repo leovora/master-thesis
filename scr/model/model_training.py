@@ -3,7 +3,7 @@ from keras.layers import LSTM, Dense
 from tensorflow.keras.callbacks import EarlyStopping
 import numpy as np
 import os
-from data.load_data import preprocess_data, load_data_from_csv
+from scr.data.load_data import preprocess_data, load_data_from_csv
 
 def train_model(X, y, sequence_length):
     model = Sequential()
@@ -28,13 +28,13 @@ def train_model(X, y, sequence_length):
 if not os.path.exists("models"):
     os.makedirs("models")
 
-def train_and_save_models(tickers, sequence_length):
+def train_and_save_models(tickers, sequence_length, model_folder: str = "models", data_folder: str = "../data", force_retrain = False):
     models = {}
     for ticker in tickers:
-        model_path = os.path.join("models", f"{ticker}_model.h5")  # Path where the model will be saved
+        model_path = os.path.join(model_folder, f"{ticker}_model.h5")  # Path where the model will be saved
 
         # Check if the model already exists
-        if os.path.exists(model_path):
+        if os.path.exists(model_path) and not force_retrain:
             print(f"Model for {ticker} already exists. Skipping training.")
             continue  # Skip to the next ticker
 
@@ -42,7 +42,7 @@ def train_and_save_models(tickers, sequence_length):
 
         try:
             # Load data from CSV and preprocess
-            df = load_data_from_csv(ticker)
+            df = load_data_from_csv(ticker, data_folder=data_folder)
             if df.empty:
                 print(f"No data found for {ticker}. Skipping...")
                 continue
