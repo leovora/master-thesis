@@ -68,8 +68,14 @@ _MODEL_CACHE = {}
 _PREDICTION_CACHE = {}
 
 
-def preprocess_ticker_from_csv(ticker, sequence_length, project_root):
-    result = preprocess_data(ticker, start_date=None, end_date=None, sequence_length=sequence_length, source="csv", data_folder=str(project_root / "data"))
+def _resolve_data_folder(project_root, data_folder):
+    data_path = Path(data_folder)
+    return data_path if data_path.is_absolute() else Path(project_root) / data_path
+
+
+def preprocess_ticker_from_csv(ticker, sequence_length, project_root, data_folder="data/LSTM_3_years"):
+    resolved_data_folder = _resolve_data_folder(project_root, data_folder)
+    result = preprocess_data(ticker, start_date=None, end_date=None, sequence_length=sequence_length, source="csv", data_folder=str(resolved_data_folder))
     if result is None:
         raise FileNotFoundError(f"Missing CSV for {ticker}")
 
@@ -83,12 +89,13 @@ def preprocess_ticker_from_csv(ticker, sequence_length, project_root):
         "y_min": y_min,
         "y_max": y_max,
         "y_range": y_range,
+        "data_folder": str(resolved_data_folder),
     }
 
-def get_ticker_data(ticker, sequence_length, project_root):
-    key = (ticker, sequence_length)
+def get_ticker_data(ticker, sequence_length, project_root, data_folder="data/LSTM_3_years"):
+    key = (ticker, sequence_length, str(_resolve_data_folder(project_root, data_folder)))
     if key not in _DATA_CACHE:
-        _DATA_CACHE[key] = preprocess_ticker_from_csv(ticker, sequence_length, project_root)
+        _DATA_CACHE[key] = preprocess_ticker_from_csv(ticker, sequence_length, project_root, data_folder=data_folder)
     return _DATA_CACHE[key]
 
 
@@ -103,24 +110,24 @@ def get_model(ticker, model_folder):
     return _MODEL_CACHE[key]
 
 
-def predict_ticker(ticker, model_folder, sequence_length, project_root, X_override=None):
-    data = get_ticker_data(ticker, sequence_length, project_root)
+def predict_ticker(ticker, model_folder, sequence_length, project_root, X_override=None, data_folder="data/LSTM_3_years"):
+    data = get_ticker_data(ticker, sequence_length, project_root, data_folder)
     X = data["X_test"] if X_override is None else X_override
     model = get_model(ticker, model_folder)
     pred_norm = model.predict(X, verbose=0).reshape(-1)
     return pred_norm * data["y_range"] + data["y_min"]
 
 
-def get_predictions_and_actuals(tickers, model_folder, sequence_length, project_root):  
+def get_predictions_and_actuals(tickers, model_folder, sequence_length, project_root, data_folder="data/LSTM_3_years"):  
     tickers = tuple(tickers)
-    key = (tickers, str(Path(model_folder).resolve()), sequence_length)
+    key = (tickers, str(Path(model_folder).resolve()), sequence_length, str(_resolve_data_folder(project_root, data_folder)))
     if key in _PREDICTION_CACHE:
         return _PREDICTION_CACHE[key]
 
     predictions, actuals = {}, {}
     for ticker in tickers:
-        predictions[ticker] = predict_ticker(ticker, model_folder, sequence_length, project_root)
-        actuals[ticker] = get_ticker_data(ticker, sequence_length, project_root)["y_actual"]
+        predictions[ticker] = predict_ticker(ticker, model_folder, sequence_length, project_root, data_folder=data_folder)
+        actuals[ticker] = get_ticker_data(ticker, sequence_length, project_root, data_folder)["y_actual"]
 
     _PREDICTION_CACHE[key] = (predictions, actuals)
     return predictions, actuals
@@ -153,12 +160,12 @@ def signal_at(signals, ticker, attack_day):
     return int(ticker_signals[attack_day])
 
 
-def evaluate_targeted_attack(setup, attack_day, target_signal, model_folders, project_root, sequence_length, max_abs_delta = 0.35, steps = 35):
+def evaluate_targeted_attack(setup, attack_day, target_signal, model_folders, project_root, sequence_length, max_abs_delta = 0.35, steps = 35, data_folder="data/LSTM_3_years"):
     ''' Evaluate one targeted attack by searching for a perturbation that forces the target signal'''
     mf = setup.model_folder(model_folders)
 
     # Build the clean ATS baseline
-    predictions_base, actuals = get_predictions_and_actuals(setup.tickers, mf, sequence_length, project_root)
+    predictions_base, actuals = get_predictions_and_actuals(setup.tickers, mf, sequence_length, project_root, data_folder)
     signals_base = setup.strategy(predictions_base, actuals)
     baseline_signal = signal_at(signals_base, setup.attacked_ticker, attack_day)
 
@@ -194,7 +201,7 @@ def evaluate_targeted_attack(setup, attack_day, target_signal, model_folders, pr
     baseline_final_cr = final_cumulative_return(baseline_returns)
 
     # Get original data from attacked ticker
-    data = get_ticker_data(setup.attacked_ticker, sequence_length, project_root)
+    data = get_ticker_data(setup.attacked_ticker, sequence_length, project_root, data_folder)
     X_original = data["X_test"]
     baseline_attacked_pred = predictions_base[setup.attacked_ticker]
 
@@ -207,7 +214,7 @@ def evaluate_targeted_attack(setup, attack_day, target_signal, model_folders, pr
             attacked_X[attack_day, -1, CLOSE_FEATURE_INDEX] + delta, 0.0, 1.0
         )
 
-        attacked_pred = predict_ticker(setup.attacked_ticker, mf, sequence_length, project_root, X_override=attacked_X)
+        attacked_pred = predict_ticker(setup.attacked_ticker, mf, sequence_length, project_root, X_override=attacked_X, data_folder=data_folder)
 
         # Replace the target ticker's baseline predictions with adversarial ones
         predictions_attack = {t: v.copy() for t, v in predictions_base.items()}
@@ -260,6 +267,7 @@ def run_targeted_attack_experiment(
     attack_days,
     model_folders,
     project_root,
+    data_folder = "data/LSTM_3_years",
     target_signals = TARGET_SIGNALS,
     sequence_length = 50,
     max_abs_delta = 0.35,
@@ -280,6 +288,7 @@ def run_targeted_attack_experiment(
                     attack_day=int(attack_day),
                     target_signal=target_signal,
                     model_folders=model_folders,
+                    data_folder=data_folder,
                     project_root=project_root,
                     sequence_length=sequence_length,
                     max_abs_delta=max_abs_delta,
@@ -345,9 +354,9 @@ def _bollinger_decision_boundary_distance(predictions, window = 20, num_std = 2)
     return np.minimum(np.abs(series - upper), np.abs(series - lower)).to_numpy()
 
 
-def candidate_attack_days(setup, model_folders, project_root, sequence_length = 50, min_day = 30, max_day = None):
+def candidate_attack_days(setup, model_folders, project_root, data_folder = "data/LSTM_3_years", sequence_length = 50, min_day = 30, max_day = None):
     '''Return the valid day indices that can be considered for launching an attack'''
-    predictions, actuals = get_predictions_and_actuals(setup.tickers, setup.model_folder(model_folders), sequence_length, project_root)
+    predictions, actuals = get_predictions_and_actuals(setup.tickers, setup.model_folder(model_folders), sequence_length, project_root, data_folder)
     signals = setup.strategy(predictions, actuals)
     upper = min(len(signals[setup.attacked_ticker]), len(predictions[setup.attacked_ticker]))
     if max_day is not None:
@@ -355,11 +364,11 @@ def candidate_attack_days(setup, model_folders, project_root, sequence_length = 
     return np.arange(min_day, upper)
 
 
-def timing_scores_for_setup(setup, model_folders, project_root, sequence_length = 50, volatility_window = 20, trend_window = 20, min_day = 30, max_day = None):
+def timing_scores_for_setup(setup, model_folders, project_root, sequence_length = 50, volatility_window = 20, trend_window = 20, min_day = 30, max_day = None, data_folder = "data/LSTM_3_years"):
     '''Compute timing-related metrics used to rank candidate attack days for one setup'''
-    predictions, actuals = get_predictions_and_actuals(setup.tickers, setup.model_folder(model_folders), sequence_length, project_root)
+    predictions, actuals = get_predictions_and_actuals(setup.tickers, setup.model_folder(model_folders), sequence_length, project_root, data_folder=data_folder)
     ticker = setup.attacked_ticker
-    days = candidate_attack_days(setup, model_folders, project_root, sequence_length, min_day, max_day)
+    days = candidate_attack_days(setup, model_folders, project_root, sequence_length=sequence_length, min_day=min_day, max_day=max_day, data_folder=data_folder)
 
     actual = actuals[ticker]
     pred = predictions[ticker]
@@ -382,9 +391,9 @@ def timing_scores_for_setup(setup, model_folders, project_root, sequence_length 
     return scores
 
 
-def select_attack_days_by_policy(setup, policy, model_folders, project_root, n_days = 12, sequence_length = 50, min_day = 30, max_day = None):
+def select_attack_days_by_policy(setup, policy, model_folders, project_root, n_days = 12, sequence_length = 50, min_day = 30, max_day = None, data_folder = "data/LSTM_3_years"):
     '''Select attack days according to the requested timing policy and ranking criterion'''
-    scores = timing_scores_for_setup(setup, model_folders, project_root, sequence_length,min_day=min_day, max_day=max_day)
+    scores = timing_scores_for_setup(setup, model_folders, project_root, sequence_length,min_day=min_day, max_day=max_day, data_folder=data_folder)
 
     if policy == "uniform":
         candidates = scores["attack_day"].to_numpy()
@@ -411,7 +420,7 @@ def select_attack_days_by_policy(setup, policy, model_folders, project_root, n_d
     return selected["attack_day"].to_numpy(dtype=int)
 
 
-def build_attack_day_plan(setups, policies, model_folders, project_root, n_days, sequence_length, min_day, max_day = None):
+def build_attack_day_plan(setups, policies, model_folders, project_root, n_days, sequence_length, min_day, max_day = None, data_folder = "data/LSTM_3_years"):
     '''Build a mapping from each setup-policy pair to its selected attack days'''
     plan = {}
     for setup in setups:
@@ -419,7 +428,7 @@ def build_attack_day_plan(setups, policies, model_folders, project_root, n_days,
             plan[(setup.name, policy)] = select_attack_days_by_policy(
                 setup, policy, model_folders, project_root,
                 n_days=n_days, sequence_length=sequence_length,
-                min_day=min_day, max_day=max_day,
+                min_day=min_day, max_day=max_day, data_folder = data_folder
             )
     return plan
 

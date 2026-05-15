@@ -7,6 +7,41 @@ from typing import Tuple
 
 FEATURES = ['high', 'low', 'open', 'close', 'volume']
 
+
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize column names for stock data."""
+    if df.empty:
+        return df
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df = df.copy()
+    df.columns = df.columns.astype(str).str.strip().str.lower()
+    return df
+
+
+def _drop_repeated_header_row(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drop the first row if it is a repeated header-like row, e.g.
+    FCX,FCX,FCX,FCX,FCX
+    """
+    if df.empty:
+        return df
+
+    first_row = df.iloc[0].astype(str).str.strip()
+    if len(set(first_row)) == 1:
+        value = first_row.iloc[0]
+        # The bogus row is usually made of the ticker repeated in every column.
+        # We only drop it if it is clearly non-numeric.
+        try:
+            float(value)
+            return df
+        except ValueError:
+            return df.iloc[1:].reset_index(drop=True)
+
+    return df
+
 def load_ticker_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     """
     Fetch data for a given ticker from Yahoo Finance.
@@ -14,7 +49,7 @@ def load_ticker_data(ticker: str, start_date: str, end_date: str) -> pd.DataFram
     try:
         df = yf.download(ticker, start=start_date, end=end_date)
         time.sleep(1.2)
-        return df
+        return _normalize_columns(df)
     except Exception as e:
         print(f"Error fetching data for {ticker}: {e}")
         return pd.DataFrame()
@@ -23,9 +58,21 @@ def preprocess_data(df: pd.DataFrame, sequence_length: int) -> Tuple[np.ndarray,
     """
     Preprocess the data by normalizing and splitting into features and targets.
     """
-    data_filtered = df[FEATURES]
+    df = _normalize_columns(df)
+    df = _drop_repeated_header_row(df)
+
+    missing = [col for col in FEATURES if col not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+
+    data_filtered = df[FEATURES].apply(pd.to_numeric, errors='coerce')
+    data_filtered = data_filtered.dropna().reset_index(drop=True)
+
+    if data_filtered.empty:
+        raise ValueError("No numeric rows available after cleaning the dataset.")
+
     X = data_filtered.values
-    y = df['close'].values
+    y = data_filtered['close'].values
     
     X = X[:-1]  # Removing the last row from features
     y = y[1:]   # Removing the first element from targets
@@ -67,6 +114,7 @@ def save_data_to_csv(tickers: list, start_date: str, end_date: str, data_folder:
         print(f"Fetching and saving data for {ticker}")
         df = load_ticker_data(ticker, start_date, end_date)
         if not df.empty:
+            df = _normalize_columns(df)
             df.to_csv(csv_path, index=False)
             print(f"Data for {ticker} saved at {csv_path}")
         else:
@@ -79,7 +127,8 @@ def load_data_from_csv(ticker: str, data_folder="../data") -> pd.DataFrame:
     csv_path = os.path.join(data_folder, 'stock_data', f"{ticker}_data.csv")
     if os.path.exists(csv_path):
         df = pd.read_csv(csv_path)
-        return df
+        df = _normalize_columns(df)
+        return _drop_repeated_header_row(df)
     else:
         print(f"No data found for {ticker} in {csv_path}")
         return pd.DataFrame()

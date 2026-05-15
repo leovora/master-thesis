@@ -22,8 +22,8 @@ tickers = ['GOOGL', 'AMZN', 'AAPL', 'PEP', 'JNJ', 'PFE', 'MRK', 'ABBV', 'PG', 'K
            'WMT', 'JPM', 'BAC', 'GS', 'V', 'XOM', 'CVX', 'COP', 'BP', 'BA',
            'MMM', 'HON', 'GE', 'T', 'VZ', 'TMUS', 'HSY', 'DUK', 'SO', 'EXC', 'AEP',
            'AMT', 'PLD', 'SPG', 'BHP', 'RIO', 'VALE', 'FCX']
-start_date = '2010-01-01'
-end_date = '2023-10-23'
+start_date = '2021-01-01'
+end_date = '2024-12-31'
 sequence_length = 50
 window_sizes = [50, 40, 30]
 
@@ -66,6 +66,10 @@ def preprocess_data(ticker, start_date, end_date, sequence_length, source="yfina
         raise ValueError(f"Missing columns: {missing}")
 
     df = df[required_cols]
+    df = df.apply(pd.to_numeric, errors='coerce').dropna().reset_index(drop=True)
+
+    if df.empty:
+        raise ValueError("No numeric rows available after cleaning the dataset.")
     
     #print("DF shape:", df.shape)
     #print(df.head())
@@ -147,6 +151,13 @@ def daily_sharpe_ratio(returns, risk_free_rate_annual=0.0505, trading_days=252):
     excess_returns = returns - risk_free_rate_daily
     return np.mean(excess_returns) / np.std(excess_returns) * np.sqrt(trading_days)
 
+
+def _set_auto_xlim(ax, series_length):
+    """Set a sensible x-axis limit based on the plotted series length."""
+    if series_length <= 0:
+        return
+    ax.set_xlim(0, max(series_length - 1, 1))
+
 def plot_dynamic_sharpe_ratio(returns, risk_free_rate=0.0505, trading_days=252, folder='plots/baseline'):
     rolling_sharpe = []
     for i in range(1, len(returns) + 1):
@@ -158,14 +169,14 @@ def plot_dynamic_sharpe_ratio(returns, risk_free_rate=0.0505, trading_days=252, 
     plt.plot(rolling_sharpe, label='Sharpe Ratio (baseline)', color='blue')  
     plt.ylabel('Sharpe Ratio', fontsize=40)
     plt.xlabel('Days', fontsize=40)
-    plt.xlim(0, 700)  
+    _set_auto_xlim(plt.gca(), len(rolling_sharpe))
     plt.grid(True) 
     plt.tight_layout()  
     
     plt.xticks(fontsize=20)  
     plt.yticks(fontsize=20)  
     plt.legend(fontsize=50)  
-    filename = folder / "sharpe_ratio_baseline.pdf"
+    filename = os.path.join(folder, "sharpe_ratio_baseline.pdf")
     plt.savefig(filename, dpi=300) 
     plt.show()
 
@@ -181,10 +192,10 @@ def plot_daily_returns(portfolio_returns, folder='plots/baseline'):
     plt.xticks(fontsize=20)  
     plt.yticks(fontsize=20) 
     plt.legend(fontsize=50)  
-    plt.xlim(0, 700) 
+    _set_auto_xlim(plt.gca(), len(returns_series))
     plt.grid(True)  
     plt.tight_layout()  
-    filename = folder / "daily_returns.pdf"
+    filename = os.path.join(folder, "daily_returns.pdf")
     plt.savefig(filename, dpi=300)  
     plt.show()
 
@@ -208,12 +219,12 @@ def plot_cumulative_returns_baseline(portfolio_returns, folder='plots/baseline')
     plt.xlabel('Days', fontsize=40)
     plt.xticks(fontsize=30)
     plt.yticks(fontsize=30)
-    plt.xlim(0, 700)
+    _set_auto_xlim(plt.gca(), len(baseline_cumulative_returns))
     plt.legend(fontsize=30)
     plt.grid(True)
     plt.tight_layout()
     
-    filename = folder / "cumulative_returns_baseline.pdf"
+    filename = os.path.join(folder, "cumulative_returns_baseline.pdf")
     plt.savefig(filename, dpi=300)
     plt.show()   
     
@@ -268,7 +279,7 @@ def plot_average_predictions(predictions: dict, actuals: dict, folder='plots/bas
     plt.xticks(fontsize=16)
     plt.yticks(fontsize=16)
 
-    filename = folder / 'average_predictions.pdf'
+    filename = os.path.join(folder, 'average_predictions.pdf')
     plt.savefig(filename, dpi=300)
     plt.show()
 
@@ -422,7 +433,11 @@ def plot_cumulative_returns_after_attack(before_returns, after_returns_list, win
     plt.xlabel('Days', fontsize=40)
     plt.xticks(fontsize=30)
     plt.yticks(fontsize=30)
-    plt.xlim(0, 700)
+    max_series_length = max(
+        [len(before_returns)] +
+        [len(returns_after) for returns_after in after_returns_list]
+    ) if after_returns_list else len(before_returns)
+    _set_auto_xlim(plt.gca(), max_series_length)
     plt.legend(fontsize=30)
     plt.grid(True)
     plt.tight_layout()
@@ -453,5 +468,3 @@ def plot_cumulative_returns_after_attack_day(tickers, start_date, end_date, sequ
 
     # Plot the cumulative returns for all windows
     plot_cumulative_returns_after_attack(pre_attack_returns, after_returns_for_all_windows, window_sizes, attack_day)
-
-
