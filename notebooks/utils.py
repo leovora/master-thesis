@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import yfinance as yf
 from keras.models import Sequential
 from keras.layers import LSTM, Dense
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from datetime import date
 import keras
 from typing import Tuple
@@ -100,6 +100,62 @@ def preprocess_data(ticker, start_date, end_date, sequence_length, source="yfina
 
     return X_train, y_train, X_test, y_test, y_min, y_max, x_min, x_max
 
+
+def preprocess_data_transformer(ticker, start_date, end_date, sequence_length, source="yfinance", data_folder="../data"):
+
+    df = safe_download(ticker, start_date, end_date, retries=3)
+
+    if df is None or df.empty:
+        return None
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df.columns = df.columns.str.lower()
+
+    required_cols = ['open', 'high', 'low', 'close', 'volume']
+    df = df[required_cols].apply(pd.to_numeric, errors='coerce').dropna()
+
+    df = df.reset_index(drop=True)
+
+    X = df[FEATURES].values.astype(np.float32)
+
+    # TARGET = RETURN (% change)
+    close_prices = df['close'].values.astype(np.float32)
+
+    returns = (close_prices[1:] / close_prices[:-1]) - 1
+
+    # align X with returns
+    X = X[:-1]
+
+    split_idx = int(len(X) * 0.8)
+
+    X_train_raw, X_test_raw = X[:split_idx], X[split_idx:]
+    y_train_raw, y_test_raw = returns[:split_idx], returns[split_idx:]
+
+    x_scaler = StandardScaler()
+    y_scaler = StandardScaler()
+
+    X_train_scaled = x_scaler.fit_transform(X_train_raw)
+    X_test_scaled = x_scaler.transform(X_test_raw)
+
+    y_train_scaled = y_scaler.fit_transform(y_train_raw.reshape(-1, 1)).flatten()
+    y_test_scaled = y_scaler.transform(y_test_raw.reshape(-1, 1)).flatten()
+
+    def make_seq(X, y):
+        Xs, ys = [], []
+        for i in range(sequence_length, len(X)):
+            Xs.append(X[i-sequence_length:i])
+            ys.append(y[i])
+        return np.array(Xs), np.array(ys)
+
+    X_train_seq, y_train_seq = make_seq(X_train_scaled, y_train_scaled)
+    X_test_seq, y_test_seq = make_seq(X_test_scaled, y_test_scaled)
+
+    # Keep the original close series so predicted returns can be mapped back
+    # to the correct base day without introducing a one-step shift.
+    return (X_train_seq, y_train_seq, X_test_seq, y_test_seq, y_scaler, close_prices)
+    
 def safe_download(ticker, start, end, retries=3):
     for i in range(retries):
         df = yf.download(ticker, start=start, end=end, progress=False)
@@ -139,6 +195,58 @@ def get_predictions(tickers, start_date, end_date, sequence_length, folder_path=
 
     return predictions, actuals
 
+def get_predictions_transformer(tickers, start_date, end_date, sequence_length, folder_path="models"):
+
+    predictions = {}
+    actuals = {}
+
+    for ticker in tickers:
+
+        print(f"Processing {ticker}...")
+
+        model_path = os.path.join(folder_path, f"{ticker}_model.h5")
+
+        if not os.path.exists(model_path):
+            continue
+
+        model = load_model(model_path, safe_mode=False)
+
+        result = preprocess_data_transformer(ticker, start_date, end_date, sequence_length)
+
+        if result is None:
+            continue
+
+        X_train, y_train, X_test, y_test, y_scaler, close_prices = result
+
+        pred_scaled = model.predict(X_test, verbose=0)
+
+        pred_returns = y_scaler.inverse_transform(pred_scaled).flatten()
+        actual_returns = y_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+
+        split_idx = int(len(close_prices) * 0.8)
+        test_start = split_idx + sequence_length
+
+        # Each predicted return at index i refers to the move from close[t]
+        # to close[t+1]. The base price must therefore be close[t], not close[t+1].
+        base_prices = close_prices[test_start : test_start + len(pred_returns)]
+
+        # safety alignment
+        min_len = min(len(base_prices), len(pred_returns), len(actual_returns))
+
+        base_prices = base_prices[:min_len]
+        pred_returns = pred_returns[:min_len]
+        actual_returns = actual_returns[:min_len]
+
+        pred_prices = base_prices * (1 + pred_returns)
+        actual_prices = base_prices * (1 + actual_returns)
+
+        predictions[ticker] = pred_prices
+        actuals[ticker] = actual_prices
+
+        print(f"{ticker} OK -> {pred_prices.shape}")
+
+    return predictions, actuals
+
 
 
 def calculate_rmse(actual, predicted):
@@ -147,9 +255,18 @@ def calculate_rmse(actual, predicted):
 
 def daily_sharpe_ratio(returns, risk_free_rate_annual=0.0505, trading_days=252):
     """Calculate daily Sharpe Ratio."""
+    returns = np.asarray(returns, dtype=float)
+    if returns.size < 2:
+        return np.nan
+
     risk_free_rate_daily = risk_free_rate_annual / trading_days
     excess_returns = returns - risk_free_rate_daily
-    return np.mean(excess_returns) / np.std(excess_returns) * np.sqrt(trading_days)
+    excess_std = np.std(excess_returns, ddof=1)
+
+    if not np.isfinite(excess_std) or excess_std == 0:
+        return np.nan
+
+    return np.mean(excess_returns) / excess_std * np.sqrt(trading_days)
 
 
 def _set_auto_xlim(ax, series_length):
@@ -158,18 +275,27 @@ def _set_auto_xlim(ax, series_length):
         return
     ax.set_xlim(0, max(series_length - 1, 1))
 
-def plot_dynamic_sharpe_ratio(returns, risk_free_rate=0.0505, trading_days=252, folder='plots/baseline'):
+def plot_dynamic_sharpe_ratio(returns, risk_free_rate=0.0505, trading_days=252, folder='plots/baseline', min_periods=20):
     rolling_sharpe = []
+    returns = np.asarray(returns, dtype=float)
+    min_periods = max(2, min(min_periods, len(returns)))
+
     for i in range(1, len(returns) + 1):
+        if i < min_periods:
+            rolling_sharpe.append(np.nan)
+            continue
+
         temp_returns = returns[:i]
         temp_sharpe = daily_sharpe_ratio(temp_returns, risk_free_rate, trading_days)
         rolling_sharpe.append(temp_sharpe)
 
     plt.figure(figsize=(14, 8))
-    plt.plot(rolling_sharpe, label='Sharpe Ratio (baseline)', color='blue')  
+    rolling_sharpe = np.asarray(rolling_sharpe, dtype=float)
+    valid_idx = np.isfinite(rolling_sharpe)
+    plt.plot(np.flatnonzero(valid_idx), rolling_sharpe[valid_idx], label='Sharpe Ratio (baseline)', color='blue')  
     plt.ylabel('Sharpe Ratio', fontsize=40)
     plt.xlabel('Days', fontsize=40)
-    _set_auto_xlim(plt.gca(), len(rolling_sharpe))
+    _set_auto_xlim(plt.gca(), len(returns))
     plt.grid(True) 
     plt.tight_layout()  
     
