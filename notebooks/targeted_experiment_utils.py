@@ -17,7 +17,15 @@ from scr.trade.trading_strategy import (
     rolling_std_deviation_strategy,
 )
 from scr.trade.backtest import simulate_trades_with_allocation
-from notebooks.utils import calculate_cumulative_returns, preprocess_data
+from notebooks.utils import (
+    _normalize_stock_frame,
+    _prepare_window_sequences,
+    _resolve_window_model_path,
+    build_quarterly_windows,
+    calculate_cumulative_returns,
+    preprocess_data,
+    safe_download,
+)
 
 FEATURES = ["high", "low", "open", "close", "volume"]
 CLOSE_FEATURE_INDEX = FEATURES.index("close")
@@ -49,6 +57,7 @@ class ATSSetup:
     tickers: Tuple[str, ...]
     strategy_name: str
     model_name: str = "LSTM"
+    model_variant: str = "single"
     attacked_ticker: str = "GOOGL"
 
     @property
@@ -65,7 +74,9 @@ class ATSSetup:
 
 _DATA_CACHE = {}
 _MODEL_CACHE = {}
+_MODEL_PATH_CACHE = {}
 _PREDICTION_CACHE = {}
+_QUARTERLY_TICKER_CACHE = {}
 
 
 def _resolve_data_folder(project_root, data_folder):
@@ -75,7 +86,7 @@ def _resolve_data_folder(project_root, data_folder):
 
 def preprocess_ticker_from_csv(ticker, sequence_length, project_root, data_folder="data/LSTM_3_years"):
     resolved_data_folder = _resolve_data_folder(project_root, data_folder)
-    result = preprocess_data(ticker, start_date=None, end_date=None, sequence_length=sequence_length, source="csv", data_folder=str(resolved_data_folder))
+    result = preprocess_data(ticker, start_date=None, end_date=None, sequence_length=sequence_length, source="yfinance", data_folder=str(resolved_data_folder))
     if result is None:
         raise FileNotFoundError(f"Missing CSV for {ticker}")
 
@@ -110,6 +121,201 @@ def get_model(ticker, model_folder):
     return _MODEL_CACHE[key]
 
 
+def get_model_by_path(model_path):
+    path = str(Path(model_path).resolve())
+    if path not in _MODEL_PATH_CACHE:
+        _MODEL_PATH_CACHE[path] = load_model(path, compile=False)
+    return _MODEL_PATH_CACHE[path]
+
+
+def _resolve_quarterly_data_folder(project_root, data_folder):
+    return _resolve_data_folder(project_root, data_folder)
+
+
+def _quarterly_ticker_cache_key(
+    ticker,
+    model_folder,
+    sequence_length,
+    project_root,
+    simulation_start,
+    simulation_end,
+    data_start,
+    months,
+    train_mode,
+    train_window_months,
+    data_folder,
+):
+    return (
+        ticker,
+        str(Path(model_folder).resolve()),
+        sequence_length,
+        str(_resolve_quarterly_data_folder(project_root, data_folder)),
+        str(pd.Timestamp(simulation_start).normalize()),
+        str(pd.Timestamp(simulation_end).normalize()),
+        str(pd.Timestamp(data_start).normalize()) if data_start is not None else None,
+        months,
+        train_mode,
+        train_window_months,
+    )
+
+
+def _build_quarterly_ticker_data(
+    ticker,
+    model_folder,
+    sequence_length,
+    project_root,
+    simulation_start,
+    simulation_end,
+    data_start=None,
+    months=3,
+    train_mode="cumulative",
+    train_window_months=3,
+    data_folder="data/20_years",
+):
+
+    resolved_data_folder = _resolve_quarterly_data_folder(project_root, data_folder)
+    df = safe_download(
+        ticker,
+        str(pd.Timestamp(data_start).normalize().date() if data_start is not None else pd.Timestamp(simulation_start).normalize().date()),
+        str((pd.Timestamp(simulation_end).normalize() + pd.Timedelta(days=1)).date()),
+    )
+    if df is None or df.empty:
+        csv_path = Path(resolved_data_folder) / "stock_data" / f"{ticker}_data.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Missing data for {ticker}: {csv_path}")
+        df = pd.read_csv(csv_path)
+
+    df = _normalize_stock_frame(df)
+    if df.empty:
+        raise ValueError(f"Empty dataframe for {ticker}")
+
+    simulation_start_ts = pd.Timestamp(simulation_start).normalize()
+    simulation_end_ts = pd.Timestamp(simulation_end).normalize()
+    data_start_ts = pd.Timestamp(data_start).normalize() if data_start is not None else simulation_start_ts
+    windows = build_quarterly_windows(simulation_start_ts, simulation_end_ts, months=months)
+
+    segments = []
+    predictions = []
+    actuals = []
+    offset = 0
+
+    for window_start, window_end in windows:
+        model_path = _resolve_window_model_path(model_folder, ticker, window_start, window_end)
+        if model_path is None:
+            continue
+
+        train_start = data_start_ts
+        if train_mode == "rolling":
+            train_start = max(data_start_ts, window_start - pd.DateOffset(months=train_window_months))
+        elif train_mode != "cumulative":
+            raise ValueError("train_mode must be either 'cumulative' or 'rolling'.")
+
+        try:
+            X_train, y_train, X_test, y_test, y_scaler = _prepare_window_sequences(
+                df=df,
+                sequence_length=sequence_length,
+                train_start=train_start,
+                train_end=window_start,
+                test_start=window_start,
+                test_end=window_end,
+            )
+        except ValueError as exc:
+            print(
+                f"[SKIP] {ticker} {window_start.date()} -> {window_end.date()}: {exc}"
+            )
+            continue
+
+        model = get_model_by_path(model_path)
+        pred_scaled = model.predict(X_test, verbose=0)
+        pred_values = y_scaler.inverse_transform(pred_scaled).flatten()
+        actual_values = y_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+
+        min_len = min(len(pred_values), len(actual_values))
+        if min_len == 0:
+            continue
+
+        pred_values = pred_values[:min_len]
+        actual_values = actual_values[:min_len]
+        X_test = X_test[:min_len]
+        y_test = y_test[:min_len]
+
+        segment = {
+            "window_start": window_start,
+            "window_end": window_end,
+            "model_path": str(Path(model_path).resolve()),
+            "X_test": X_test,
+            "y_test": y_test,
+            "y_scaler": y_scaler,
+            "start_idx": offset,
+            "end_idx": offset + min_len,
+            "predictions": pred_values,
+            "actuals": actual_values,
+        }
+        segments.append(segment)
+        predictions.append(pred_values)
+        actuals.append(actual_values)
+        offset += min_len
+
+    if not predictions:
+        raise FileNotFoundError(f"No quarterly model/data segments found for {ticker}")
+
+    return {
+        "segments": segments,
+        "predictions": np.concatenate(predictions),
+        "actuals": np.concatenate(actuals),
+    }
+
+
+def get_quarterly_ticker_data(
+    ticker,
+    model_folder,
+    sequence_length,
+    project_root,
+    simulation_start,
+    simulation_end,
+    data_start=None,
+    months=3,
+    train_mode="cumulative",
+    train_window_months=3,
+    data_folder="data/20_years",
+):
+    key = _quarterly_ticker_cache_key(
+        ticker,
+        model_folder,
+        sequence_length,
+        project_root,
+        simulation_start,
+        simulation_end,
+        data_start,
+        months,
+        train_mode,
+        train_window_months,
+        data_folder,
+    )
+    if key not in _QUARTERLY_TICKER_CACHE:
+        _QUARTERLY_TICKER_CACHE[key] = _build_quarterly_ticker_data(
+            ticker=ticker,
+            model_folder=model_folder,
+            sequence_length=sequence_length,
+            project_root=project_root,
+            simulation_start=simulation_start,
+            simulation_end=simulation_end,
+            data_start=data_start,
+            months=months,
+            train_mode=train_mode,
+            train_window_months=train_window_months,
+            data_folder=data_folder,
+        )
+    return _QUARTERLY_TICKER_CACHE[key]
+
+
+def _segment_for_attack_day(segments, attack_day):
+    for segment in segments:
+        if segment["start_idx"] <= attack_day < segment["end_idx"]:
+            return segment, attack_day - segment["start_idx"]
+    return None, None
+
+
 def predict_ticker(ticker, model_folder, sequence_length, project_root, X_override=None, data_folder="data/LSTM_3_years"):
     data = get_ticker_data(ticker, sequence_length, project_root, data_folder)
     X = data["X_test"] if X_override is None else X_override
@@ -118,16 +324,73 @@ def predict_ticker(ticker, model_folder, sequence_length, project_root, X_overri
     return pred_norm * data["y_range"] + data["y_min"]
 
 
-def get_predictions_and_actuals(tickers, model_folder, sequence_length, project_root, data_folder="data/LSTM_3_years"):  
+def get_predictions_and_actuals(
+    tickers,
+    model_folder,
+    sequence_length,
+    project_root,
+    data_folder="data/LSTM_3_years",
+    model_variant="single",
+    simulation_start=None,
+    simulation_end=None,
+    data_start=None,
+    months=3,
+    train_mode="cumulative",
+    train_window_months=3,
+):  
     tickers = tuple(tickers)
-    key = (tickers, str(Path(model_folder).resolve()), sequence_length, str(_resolve_data_folder(project_root, data_folder)))
+    key = (
+        tickers,
+        str(Path(model_folder).resolve()),
+        sequence_length,
+        str(_resolve_data_folder(project_root, data_folder)),
+        model_variant,
+        str(pd.Timestamp(simulation_start).normalize()) if simulation_start is not None else None,
+        str(pd.Timestamp(simulation_end).normalize()) if simulation_end is not None else None,
+        str(pd.Timestamp(data_start).normalize()) if data_start is not None else None,
+        months,
+        train_mode,
+        train_window_months,
+    )
     if key in _PREDICTION_CACHE:
         return _PREDICTION_CACHE[key]
 
     predictions, actuals = {}, {}
-    for ticker in tickers:
-        predictions[ticker] = predict_ticker(ticker, model_folder, sequence_length, project_root, data_folder=data_folder)
-        actuals[ticker] = get_ticker_data(ticker, sequence_length, project_root, data_folder)["y_actual"]
+    if model_variant == "quarterly":
+        if simulation_start is None or simulation_end is None:
+            raise ValueError("simulation_start and simulation_end are required for quarterly models.")
+
+        for ticker in tickers:
+            ticker_data = get_quarterly_ticker_data(
+                ticker=ticker,
+                model_folder=model_folder,
+                sequence_length=sequence_length,
+                project_root=project_root,
+                simulation_start=simulation_start,
+                simulation_end=simulation_end,
+                data_start=data_start,
+                months=months,
+                train_mode=train_mode,
+                train_window_months=train_window_months,
+                data_folder=data_folder,
+            )
+            predictions[ticker] = ticker_data["predictions"]
+            actuals[ticker] = ticker_data["actuals"]
+    else:
+        for ticker in tickers:
+            predictions[ticker] = predict_ticker(
+                ticker,
+                model_folder,
+                sequence_length,
+                project_root,
+                data_folder=data_folder,
+            )
+            actuals[ticker] = get_ticker_data(ticker, sequence_length, project_root, data_folder)["y_actual"]
+
+    if predictions:
+        min_len = min(len(values) for values in predictions.values())
+        predictions = {ticker: values[:min_len] for ticker, values in predictions.items()}
+        actuals = {ticker: values[:min_len] for ticker, values in actuals.items()}
 
     _PREDICTION_CACHE[key] = (predictions, actuals)
     return predictions, actuals
@@ -160,12 +423,43 @@ def signal_at(signals, ticker, attack_day):
     return int(ticker_signals[attack_day])
 
 
-def evaluate_targeted_attack(setup, attack_day, target_signal, model_folders, project_root, sequence_length, max_abs_delta = 0.35, steps = 35, data_folder="data/LSTM_3_years"):
+def evaluate_targeted_attack(
+    setup,
+    attack_day,
+    target_signal,
+    model_folders,
+    project_root,
+    sequence_length,
+    max_abs_delta = 0.35,
+    steps = 35,
+    data_folder="data/LSTM_3_years",
+    simulation_start=None,
+    simulation_end=None,
+    data_start=None,
+    months=3,
+    train_mode="single",
+    train_window_months=3,
+    diagnostics=False,
+):
     ''' Evaluate one targeted attack by searching for a perturbation that forces the target signal'''
     mf = setup.model_folder(model_folders)
+    model_variant = getattr(setup, "model_variant", "single")
 
     # Build the clean ATS baseline
-    predictions_base, actuals = get_predictions_and_actuals(setup.tickers, mf, sequence_length, project_root, data_folder)
+    predictions_base, actuals = get_predictions_and_actuals(
+        setup.tickers,
+        mf,
+        sequence_length,
+        project_root,
+        data_folder,
+        model_variant=model_variant,
+        simulation_start=simulation_start,
+        simulation_end=simulation_end,
+        data_start=data_start,
+        months=months,
+        train_mode=train_mode,
+        train_window_months=train_window_months,
+    )
     signals_base = setup.strategy(predictions_base, actuals)
     baseline_signal = signal_at(signals_base, setup.attacked_ticker, attack_day)
 
@@ -201,20 +495,91 @@ def evaluate_targeted_attack(setup, attack_day, target_signal, model_folders, pr
     baseline_final_cr = final_cumulative_return(baseline_returns)
 
     # Get original data from attacked ticker
-    data = get_ticker_data(setup.attacked_ticker, sequence_length, project_root, data_folder)
-    X_original = data["X_test"]
-    baseline_attacked_pred = predictions_base[setup.attacked_ticker]
+    if model_variant == "quarterly":
+        quarterly_data = get_quarterly_ticker_data(
+            ticker=setup.attacked_ticker,
+            model_folder=mf,
+            sequence_length=sequence_length,
+            project_root=project_root,
+            simulation_start=simulation_start,
+            simulation_end=simulation_end,
+            data_start=data_start,
+            months=months,
+            train_mode=train_mode,
+            train_window_months=train_window_months,
+            data_folder=data_folder,
+        )
+        segment, local_attack_day = _segment_for_attack_day(quarterly_data["segments"], attack_day)
+        if segment is None:
+            return {
+                **_base_row,
+                "baseline_signal": baseline_signal,
+                "baseline_label": SIGNAL_LABELS.get(baseline_signal, "NA"),
+                "attacked_signal": float("nan"),
+                "attacked_label": "NA",
+                "success": False,
+                "already_target": baseline_signal == target_signal,
+                "min_delta_norm": float("nan"),
+                "min_abs_delta_norm": float("nan"),
+                "prediction_shift": float("nan"),
+                "delta_final_cr": float("nan"),
+                "valid": False,
+            }
+        X_original = segment["X_test"]
+        baseline_attacked_pred = predictions_base[setup.attacked_ticker]
+    else:
+        data = get_ticker_data(setup.attacked_ticker, sequence_length, project_root, data_folder)
+        X_original = data["X_test"]
+        baseline_attacked_pred = predictions_base[setup.attacked_ticker]
 
     best = None
     # Search the smallest perturbation that reaches the target signal
     for delta in make_delta_grid(max_abs_delta=max_abs_delta, steps=steps):
-        attacked_X = X_original.copy()
-        # Perturb only the last "close" value of the attacked input window
-        attacked_X[attack_day, -1, CLOSE_FEATURE_INDEX] = np.clip(
-            attacked_X[attack_day, -1, CLOSE_FEATURE_INDEX] + delta, 0.0, 1.0
-        )
+        if model_variant == "quarterly":
+            attacked_pred = baseline_attacked_pred.copy()
+            start_idx = min(segment["start_idx"], len(attacked_pred))
+            end_idx = min(segment["end_idx"], len(attacked_pred))
 
-        attacked_pred = predict_ticker(setup.attacked_ticker, mf, sequence_length, project_root, X_override=attacked_X, data_folder=data_folder)
+            # Reuse the baseline exactly when delta is zero. This avoids
+            # re-running the quarterly model and guarantees that the
+            # no-op case cannot drift away from the cached baseline.
+            if delta == 0.0:
+                attacked_pred_window = segment["predictions"]
+            else:
+                attacked_X = X_original.copy()
+                attacked_X[local_attack_day, -1, CLOSE_FEATURE_INDEX] = np.clip(
+                    attacked_X[local_attack_day, -1, CLOSE_FEATURE_INDEX] + delta, 0.0, 1.0
+                )
+                attacked_model = get_model_by_path(segment["model_path"])
+                attacked_pred_scaled = attacked_model.predict(attacked_X, verbose=0).reshape(-1)
+                attacked_pred_window = segment["y_scaler"].inverse_transform(attacked_pred_scaled.reshape(-1, 1)).flatten()
+
+            if end_idx > start_idx:
+                attacked_pred[start_idx:end_idx] = attacked_pred_window[: end_idx - start_idx]
+            if diagnostics and delta == 0.0:
+                diff = np.abs(attacked_pred[: len(baseline_attacked_pred)] - baseline_attacked_pred)
+                max_diff_idx = int(np.nanargmax(diff)) if len(diff) else None
+                max_diff = float(np.nanmax(diff)) if len(diff) else float("nan")
+                if np.isfinite(max_diff) and max_diff > 1e-6:
+                    print(
+                        "[WARN] quarterly delta=0 mismatch for "
+                        f"{setup.name} / {setup.attacked_ticker} / day={attack_day} / "
+                        f"segment={segment['window_start'].date()}->{segment['window_end'].date()} / "
+                        f"max_abs_diff={max_diff:.6f} at idx={max_diff_idx} / "
+                        f"baseline={baseline_attacked_pred[attack_day]:.6f} / "
+                        f"attacked={attacked_pred[attack_day]:.6f}"
+                    )
+        else:
+            if delta == 0.0:
+                attacked_pred = baseline_attacked_pred.copy()
+            else:
+                attacked_X = X_original.copy()
+                # Perturb only the last "close" value of the attacked input window
+                attacked_X[attack_day, -1, CLOSE_FEATURE_INDEX] = np.clip(
+                    attacked_X[attack_day, -1, CLOSE_FEATURE_INDEX] + delta, 0.0, 1.0
+                )
+
+                attacked_pred = predict_ticker(setup.attacked_ticker, mf, sequence_length, project_root, X_override=attacked_X, data_folder=data_folder)
 
         # Replace the target ticker's baseline predictions with adversarial ones
         predictions_attack = {t: v.copy() for t, v in predictions_base.items()}
@@ -273,7 +638,14 @@ def run_targeted_attack_experiment(
     max_abs_delta = 0.35,
     steps = 35,
     timing_policy = "manual",
-    verbose = True
+    verbose = True,
+    simulation_start=None,
+    simulation_end=None,
+    data_start=None,
+    months=3,
+    train_mode="cumulative",
+    train_window_months=3,
+    diagnostics=False,
 ):
     rows = []
     attack_days = list(attack_days)
@@ -293,6 +665,13 @@ def run_targeted_attack_experiment(
                     sequence_length=sequence_length,
                     max_abs_delta=max_abs_delta,
                     steps=steps,
+                    simulation_start=simulation_start,
+                    simulation_end=simulation_end,
+                    data_start=data_start,
+                    months=months,
+                    train_mode=train_mode,
+                    train_window_months=train_window_months,
+                    diagnostics=diagnostics,
                 )
                 row["objective"] = objective_name
                 row["timing_policy"] = timing_policy
@@ -354,9 +733,36 @@ def _bollinger_decision_boundary_distance(predictions, window = 20, num_std = 2)
     return np.minimum(np.abs(series - upper), np.abs(series - lower)).to_numpy()
 
 
-def candidate_attack_days(setup, model_folders, project_root, data_folder = "data/LSTM_3_years", sequence_length = 50, min_day = 30, max_day = None):
+def candidate_attack_days(
+    setup,
+    model_folders,
+    project_root,
+    data_folder = "data/LSTM_3_years",
+    sequence_length = 50,
+    min_day = 30,
+    max_day = None,
+    simulation_start=None,
+    simulation_end=None,
+    data_start=None,
+    months=3,
+    train_mode="cumulative",
+    train_window_months=3,
+):
     '''Return the valid day indices that can be considered for launching an attack'''
-    predictions, actuals = get_predictions_and_actuals(setup.tickers, setup.model_folder(model_folders), sequence_length, project_root, data_folder)
+    predictions, actuals = get_predictions_and_actuals(
+        setup.tickers,
+        setup.model_folder(model_folders),
+        sequence_length,
+        project_root,
+        data_folder,
+        model_variant=getattr(setup, "model_variant", "single"),
+        simulation_start=simulation_start,
+        simulation_end=simulation_end,
+        data_start=data_start,
+        months=months,
+        train_mode=train_mode,
+        train_window_months=train_window_months,
+    )
     signals = setup.strategy(predictions, actuals)
     upper = min(len(signals[setup.attacked_ticker]), len(predictions[setup.attacked_ticker]))
     if max_day is not None:
@@ -364,11 +770,54 @@ def candidate_attack_days(setup, model_folders, project_root, data_folder = "dat
     return np.arange(min_day, upper)
 
 
-def timing_scores_for_setup(setup, model_folders, project_root, sequence_length = 50, volatility_window = 20, trend_window = 20, min_day = 30, max_day = None, data_folder = "data/LSTM_3_years"):
+def timing_scores_for_setup(
+    setup,
+    model_folders,
+    project_root,
+    sequence_length = 50,
+    volatility_window = 20,
+    trend_window = 20,
+    min_day = 30,
+    max_day = None,
+    data_folder = "data/LSTM_3_years",
+    simulation_start=None,
+    simulation_end=None,
+    data_start=None,
+    months=3,
+    train_mode="cumulative",
+    train_window_months=3,
+):
     '''Compute timing-related metrics used to rank candidate attack days for one setup'''
-    predictions, actuals = get_predictions_and_actuals(setup.tickers, setup.model_folder(model_folders), sequence_length, project_root, data_folder=data_folder)
+    predictions, actuals = get_predictions_and_actuals(
+        setup.tickers,
+        setup.model_folder(model_folders),
+        sequence_length,
+        project_root,
+        data_folder=data_folder,
+        model_variant=getattr(setup, "model_variant", "single"),
+        simulation_start=simulation_start,
+        simulation_end=simulation_end,
+        data_start=data_start,
+        months=months,
+        train_mode=train_mode,
+        train_window_months=train_window_months,
+    )
     ticker = setup.attacked_ticker
-    days = candidate_attack_days(setup, model_folders, project_root, sequence_length=sequence_length, min_day=min_day, max_day=max_day, data_folder=data_folder)
+    days = candidate_attack_days(
+        setup,
+        model_folders,
+        project_root,
+        sequence_length=sequence_length,
+        min_day=min_day,
+        max_day=max_day,
+        data_folder=data_folder,
+        simulation_start=simulation_start,
+        simulation_end=simulation_end,
+        data_start=data_start,
+        months=months,
+        train_mode=train_mode,
+        train_window_months=train_window_months,
+    )
 
     actual = actuals[ticker]
     pred = predictions[ticker]
@@ -391,9 +840,39 @@ def timing_scores_for_setup(setup, model_folders, project_root, sequence_length 
     return scores
 
 
-def select_attack_days_by_policy(setup, policy, model_folders, project_root, n_days = 12, sequence_length = 50, min_day = 30, max_day = None, data_folder = "data/LSTM_3_years"):
+def select_attack_days_by_policy(
+    setup,
+    policy,
+    model_folders,
+    project_root,
+    n_days = 12,
+    sequence_length = 50,
+    min_day = 30,
+    max_day = None,
+    data_folder = "data/LSTM_3_years",
+    simulation_start=None,
+    simulation_end=None,
+    data_start=None,
+    months=3,
+    train_mode="cumulative",
+    train_window_months=3,
+):
     '''Select attack days according to the requested timing policy and ranking criterion'''
-    scores = timing_scores_for_setup(setup, model_folders, project_root, sequence_length,min_day=min_day, max_day=max_day, data_folder=data_folder)
+    scores = timing_scores_for_setup(
+        setup,
+        model_folders,
+        project_root,
+        sequence_length,
+        min_day=min_day,
+        max_day=max_day,
+        data_folder=data_folder,
+        simulation_start=simulation_start,
+        simulation_end=simulation_end,
+        data_start=data_start,
+        months=months,
+        train_mode=train_mode,
+        train_window_months=train_window_months,
+    )
 
     if policy == "uniform":
         candidates = scores["attack_day"].to_numpy()
@@ -420,7 +899,23 @@ def select_attack_days_by_policy(setup, policy, model_folders, project_root, n_d
     return selected["attack_day"].to_numpy(dtype=int)
 
 
-def build_attack_day_plan(setups, policies, model_folders, project_root, n_days, sequence_length, min_day, max_day = None, data_folder = "data/LSTM_3_years"):
+def build_attack_day_plan(
+    setups,
+    policies,
+    model_folders,
+    project_root,
+    n_days,
+    sequence_length,
+    min_day,
+    max_day = None,
+    data_folder = "data/LSTM_3_years",
+    simulation_start=None,
+    simulation_end=None,
+    data_start=None,
+    months=3,
+    train_mode="cumulative",
+    train_window_months=3,
+):
     '''Build a mapping from each setup-policy pair to its selected attack days'''
     plan = {}
     for setup in setups:
@@ -428,7 +923,13 @@ def build_attack_day_plan(setups, policies, model_folders, project_root, n_days,
             plan[(setup.name, policy)] = select_attack_days_by_policy(
                 setup, policy, model_folders, project_root,
                 n_days=n_days, sequence_length=sequence_length,
-                min_day=min_day, max_day=max_day, data_folder = data_folder
+                min_day=min_day, max_day=max_day, data_folder = data_folder,
+                simulation_start=simulation_start,
+                simulation_end=simulation_end,
+                data_start=data_start,
+                months=months,
+                train_mode=train_mode,
+                train_window_months=train_window_months,
             )
     return plan
 
@@ -437,7 +938,7 @@ def build_attack_day_plan(setups, policies, model_folders, project_root, n_days,
 # Analize results
 # ---------------------------------------------------------------------------
 
-def compute_summary_by_setup(results):
+def compute_summary_by_setup_and_timing(results):
     valid = results[results["valid"]].copy()
     valid["success"] = valid["success"].astype(bool)
     valid["already_target"] = valid["already_target"].astype(bool)
@@ -504,3 +1005,58 @@ def compute_timing_summaries(results):
         timing_summary,
         policy_summary.sort_values("nontrivial_attack_success_rate", ascending=False),
     )
+
+
+def compute_summary_by_setup(results):
+
+    valid = results[results["valid"]].copy()
+
+    valid["success"] = valid["success"].astype(bool)
+    valid["already_target"] = valid["already_target"].astype(bool)
+
+    valid["nontrivial_success"] = (
+        valid["success"] & ~valid["already_target"]
+    )
+
+    summary = (
+        valid.groupby("setup", as_index=False)
+        .agg(
+            trials=("success", "size"),
+            attack_success_rate=("success", "mean"),
+            baseline_target_rate=("already_target", "mean"),
+            nontrivial_trials=(
+                "already_target",
+                lambda x: int((~x).sum())
+            ),
+            nontrivial_successes=("nontrivial_success", "sum"),
+            mean_min_abs_delta_norm=(
+                "min_abs_delta_norm",
+                "mean",
+            ),
+            median_min_abs_delta_norm=(
+                "min_abs_delta_norm",
+                "median",
+            ),
+            mean_delta_final_cr=(
+                "delta_final_cr",
+                "mean",
+            ),
+        )
+    )
+
+    summary["nontrivial_attack_success_rate"] = np.where(
+        summary["nontrivial_trials"] > 0,
+        summary["nontrivial_successes"]
+        / summary["nontrivial_trials"],
+        np.nan,
+    )
+
+    summary = summary.sort_values(
+        [
+            "nontrivial_attack_success_rate",
+            "attack_success_rate",
+        ],
+        ascending=[False, False],
+    )
+
+    return summary
