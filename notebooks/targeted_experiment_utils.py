@@ -86,7 +86,7 @@ def _resolve_data_folder(project_root, data_folder):
 
 def preprocess_ticker_from_csv(ticker, sequence_length, project_root, data_folder="data/LSTM_3_years"):
     resolved_data_folder = _resolve_data_folder(project_root, data_folder)
-    result = preprocess_data(ticker, start_date=None, end_date=None, sequence_length=sequence_length, source="yfinance", data_folder=str(resolved_data_folder))
+    result = preprocess_data(ticker, start_date=None, end_date=None, sequence_length=sequence_length, source="csv", data_folder=str(resolved_data_folder))
     if result is None:
         raise FileNotFoundError(f"Missing CSV for {ticker}")
 
@@ -423,6 +423,17 @@ def signal_at(signals, ticker, attack_day):
     return int(ticker_signals[attack_day])
 
 
+def attack_signal_day(attack_day, signal_shift=1):
+    """
+    Map an attack day to the trading-signal index that actually reflects it.
+
+    The MA/ROC/BB strategies in scr.trade.trading_strategy are shifted by one
+    step to avoid lookahead bias, so the effect of a perturbation applied at
+    day d is evaluated on the signal at day d + 1.
+    """
+    return int(attack_day) + int(signal_shift)
+
+
 def evaluate_targeted_attack(
     setup,
     attack_day,
@@ -461,7 +472,8 @@ def evaluate_targeted_attack(
         train_window_months=train_window_months,
     )
     signals_base = setup.strategy(predictions_base, actuals)
-    baseline_signal = signal_at(signals_base, setup.attacked_ticker, attack_day)
+    eval_day = attack_signal_day(attack_day)
+    baseline_signal = signal_at(signals_base, setup.attacked_ticker, eval_day)
 
     _base_row = {
         "setup": setup.name,
@@ -587,7 +599,7 @@ def evaluate_targeted_attack(
 
         # Recompute the trading decision after the attacked prediction
         signals_attack = setup.strategy(predictions_attack, actuals)
-        attacked_signal = signal_at(signals_attack, setup.attacked_ticker, attack_day)
+        attacked_signal = signal_at(signals_attack, setup.attacked_ticker, eval_day)
 
         if attacked_signal == target_signal:
             # Store the first successful delta
@@ -764,7 +776,7 @@ def candidate_attack_days(
         train_window_months=train_window_months,
     )
     signals = setup.strategy(predictions, actuals)
-    upper = min(len(signals[setup.attacked_ticker]), len(predictions[setup.attacked_ticker]))
+    upper = min(len(signals[setup.attacked_ticker]), len(predictions[setup.attacked_ticker])) - 1
     if max_day is not None:
         upper = min(upper, max_day)
     return np.arange(min_day, upper)
@@ -821,21 +833,22 @@ def timing_scores_for_setup(
 
     actual = actuals[ticker]
     pred = predictions[ticker]
+    signal_days = days + 1
 
     scores = pd.DataFrame({"attack_day": days})
     scores["actual_volatility"] = _rolling_std(actual, volatility_window)[days]
     scores["prediction_volatility"] = _rolling_std(pred, volatility_window)[days]
     scores["abs_trend"] = np.abs(_rate_of_change(actual, trend_window)[days])
-    scores["baseline_signal"] = setup.strategy(predictions, actuals)[ticker][days]
+    scores["baseline_signal"] = setup.strategy(predictions, actuals)[ticker][signal_days]
 
     if setup.strategy_name == "MA":
-        scores["strategy_boundary_distance"] = _ma_decision_boundary_distance(pred)[days]
+        scores["strategy_boundary_distance"] = _ma_decision_boundary_distance(pred)[signal_days]
 
     elif setup.strategy_name == "ROC":
-        scores["strategy_boundary_distance"] = _roc_decision_boundary_distance(pred)[days]
+        scores["strategy_boundary_distance"] = _roc_decision_boundary_distance(pred)[signal_days]
 
     elif setup.strategy_name == "BB":
-        scores["strategy_boundary_distance"] = _bollinger_decision_boundary_distance(pred)[days]
+        scores["strategy_boundary_distance"] = _bollinger_decision_boundary_distance(pred)[signal_days]
 
     return scores
 

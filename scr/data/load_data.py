@@ -76,14 +76,21 @@ def preprocess_data(df: pd.DataFrame, sequence_length: int) -> Tuple[np.ndarray,
     
     X = X[:-1]  # Removing the last row from features
     y = y[1:]   # Removing the first element from targets
-    
-    x_min = np.min(X, axis=0)
-    x_max = np.max(X, axis=0)
-    X_norm = (X - x_min) / (x_max - x_min)
-    
-    y_max = np.max(y)
-    y_min = np.min(y)
-    y_norm = (y - y_min) / (y_max - y_min)
+
+    # Fit the scaler only on the historical training slice to avoid leaking
+    # future information into the normalization parameters.
+    split_index = max(sequence_length + 1, int(len(X) * 0.8))
+    split_index = min(split_index, len(X))
+    x_train_raw = X[:split_index]
+    y_train_raw = y[:split_index]
+
+    x_min = np.min(x_train_raw, axis=0)
+    x_max = np.max(x_train_raw, axis=0)
+    X_norm = (X - x_min) / (x_max - x_min + 1e-8)
+
+    y_max = np.max(y_train_raw)
+    y_min = np.min(y_train_raw)
+    y_norm = (y - y_min) / (y_max - y_min + 1e-8)
     
     X_seq = []
     y_seq = []
