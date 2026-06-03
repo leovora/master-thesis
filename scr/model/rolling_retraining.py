@@ -1,0 +1,347 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
+from keras.callbacks import EarlyStopping
+from keras.layers import Dense, LSTM
+from keras.models import Sequential, load_model
+from sklearn.preprocessing import MinMaxScaler
+
+from scr.data.load_data import (
+    FEATURES,
+    _drop_repeated_header_row,
+    _normalize_columns,
+    load_ticker_data,
+)
+
+
+@dataclass
+class RollingModelSaveResult:
+    window_start: pd.Timestamp
+    window_end: pd.Timestamp
+    ticker: str
+    model_path: str
+    saved: bool
+    reused: bool
+
+
+def _clean_stock_frame(df):
+    """Normalize, clean and sort a price dataframe."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = _normalize_columns(df)
+    df = _drop_repeated_header_row(df)
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df = df.copy()
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date")
+
+    df = df.sort_index()
+    return df
+
+
+def _build_rolling_lstm_model(sequence_length, feature_dim):
+    """Build the LSTM used for rolling-window retraining."""
+    model = Sequential()
+    n_neurons = sequence_length * feature_dim
+    model.add(LSTM(n_neurons, return_sequences=True, input_shape=(sequence_length, feature_dim)))
+    model.add(LSTM(n_neurons, return_sequences=False))
+    model.add(Dense(5))
+    model.add(Dense(1))
+    model.compile(optimizer="adam", loss="mean_squared_error")
+    return model
+
+
+def _train_rolling_lstm_model(X, y, sequence_length):
+    """
+    Train the LSTM on a fixed rolling history using a chronological validation split.
+    """
+    if len(X) < 2:
+        raise ValueError("Need at least two samples to train the model.")
+
+    val_size = max(1, int(len(X) * 0.2))
+    X_train, X_val = X[:-val_size], X[-val_size:]
+    y_train, y_val = y[:-val_size], y[-val_size:]
+
+    model = _build_rolling_lstm_model(sequence_length, X.shape[2])
+
+    early_stop = EarlyStopping(
+        monitor="val_loss",
+        patience=5,
+        restore_best_weights=True,
+        verbose=1,
+    )
+
+    model.fit(
+        X_train,
+        y_train,
+        validation_data=(X_val, y_val),
+        batch_size=16,
+        epochs=50,
+        shuffle=False,
+        callbacks=[early_stop],
+        verbose=1,
+    )
+
+    return model
+
+
+def build_rolling_windows(simulation_start, simulation_end, months = 3):
+    """
+    Build fixed-length, non-overlapping windows of the simulation period.
+
+    The end of each window is treated as exclusive.
+    """
+    start = pd.Timestamp(simulation_start).normalize()
+    end_exclusive = pd.Timestamp(simulation_end).normalize() + pd.Timedelta(days=1)
+
+    windows = []
+    cursor = start
+    while cursor < end_exclusive:
+        next_cursor = cursor + pd.DateOffset(months=months)
+        window_end = min(next_cursor, end_exclusive)
+        windows.append((cursor, window_end))
+        cursor = window_end
+
+    return windows
+
+
+def _prepare_rolling_sequences(df, sequence_length, train_start, train_end, test_end):
+    """
+    Prepare train/test sequences for one rolling window.
+
+    Training uses only samples whose full sequence and target lie inside
+    [train_start, train_end). Testing uses samples whose full sequence starts
+    inside the rolling history and whose target lies in [train_end, test_end).
+    """
+    df = _clean_stock_frame(df)
+    if df.empty:
+        raise ValueError("Empty dataframe after cleaning.")
+
+    missing = [col for col in FEATURES if col not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+
+    data = df[FEATURES].apply(pd.to_numeric, errors="coerce").dropna()
+    if data.empty:
+        raise ValueError("No numeric rows available after cleaning the dataset.")
+
+    data = data.sort_index()
+    close_prices = data["close"].to_numpy(dtype=float)
+    row_dates = pd.to_datetime(data.index).to_numpy()
+
+    if len(data) <= sequence_length:
+        raise ValueError(
+            f"Not enough rows for sequence_length={sequence_length} inside the available data."
+        )
+
+    train_data = data[(data.index >= train_start) & (data.index < train_end)]
+    if train_data.empty:
+        raise ValueError(
+            f"No training rows found in rolling window [{train_start.date()}, {train_end.date()})."
+        )
+
+    x_scaler = MinMaxScaler()
+    y_scaler = MinMaxScaler()
+    x_scaler.fit(train_data.to_numpy(dtype=float))
+    y_scaler.fit(train_data["close"].to_numpy(dtype=float).reshape(-1, 1))
+
+    X_scaled = x_scaler.transform(data.to_numpy(dtype=float))
+    y_scaled = y_scaler.transform(close_prices.reshape(-1, 1)).flatten()
+
+    X_seq = []
+    y_seq = []
+    seq_start_dates = []
+    seq_target_dates = []
+
+    for i in range(sequence_length, len(X_scaled)):
+        seq_start_dates.append(pd.Timestamp(row_dates[i - sequence_length]))
+        seq_target_dates.append(pd.Timestamp(row_dates[i]))
+        X_seq.append(X_scaled[i - sequence_length : i])
+        y_seq.append(float(y_scaled[i]))
+
+    X_seq = np.asarray(X_seq, dtype=float)
+    y_seq = np.asarray(y_seq, dtype=float)
+    seq_start_dates = np.asarray(seq_start_dates, dtype="datetime64[ns]")
+    seq_target_dates = np.asarray(seq_target_dates, dtype="datetime64[ns]")
+
+    train_seq_mask = (
+        (seq_start_dates >= np.datetime64(train_start))
+        & (seq_target_dates < np.datetime64(train_end))
+        & (seq_target_dates >= np.datetime64(train_start))
+    )
+    test_seq_mask = (
+        (seq_start_dates >= np.datetime64(train_start))
+        & (seq_target_dates >= np.datetime64(train_end))
+        & (seq_target_dates < np.datetime64(test_end))
+    )
+
+    X_train = X_seq[train_seq_mask]
+    y_train = y_seq[train_seq_mask]
+    X_test = X_seq[test_seq_mask]
+    y_test = y_seq[test_seq_mask]
+
+    if len(X_train) == 0:
+        raise ValueError(
+            f"No train sequences generated in rolling window [{train_start.date()}, {train_end.date()})."
+        )
+    if len(X_test) == 0:
+        raise ValueError(f"No test sequences generated in [{train_end.date()}, {test_end.date()}).")
+
+    return X_train, y_train, X_test, y_test, x_scaler, y_scaler
+
+
+def prepare_rolling_window_data(df, sequence_length, window_start, window_end, lookback_years = 3):
+    """
+    Build a train/test split for one rolling quarterly window.
+
+    The model trains only on the fixed historical window ending at `window_start`
+    and spanning `lookback_years` years backwards.
+    """
+    test_start = pd.Timestamp(window_start).normalize()
+    test_end = pd.Timestamp(window_end).normalize()
+    train_start = test_start - pd.DateOffset(years=lookback_years)
+    X_train, y_train, X_test, y_test, x_scaler, y_scaler = _prepare_rolling_sequences(df=df, sequence_length=sequence_length, train_start=train_start, train_end=test_start, test_end=test_end,)
+
+    return {
+        "X_train": X_train,
+        "y_train": y_train,
+        "X_test": X_test,
+        "y_test": y_test,
+        "x_scaler": x_scaler,
+        "y_scaler": y_scaler,
+        "train_start": train_start,
+        "train_end": test_start,
+    }
+
+
+def train_rolling_lstm_for_window(df, sequence_length, window_start, window_end, lookback_years = 3):
+    """
+    Train a fresh LSTM on the fixed rolling history available before `window_start`.
+    """
+    prepared = prepare_rolling_window_data(df, sequence_length, window_start, window_end, lookback_years=lookback_years)
+    model = _train_rolling_lstm_model(prepared["X_train"], prepared["y_train"], sequence_length)
+    return model, prepared
+
+
+def train_and_save_rolling_quarterly_models(
+    tickers,
+    simulation_start,
+    simulation_end,
+    sequence_length,
+    data_start = None,
+    data_end = None,
+    months = 3,
+    lookback_years = 3,
+    model_folder = "models/LSTM_rolling",
+    save_models = True,
+    force_retrain = False,
+):
+    """
+    Train and save one quarterly rolling LSTM model per ticker and window.
+
+    For each window:
+    - train one fresh LSTM per ticker using only the last `lookback_years` years;
+    - save the versioned model on disk for later prediction loading.
+    """
+    if lookback_years <= 0:
+        raise ValueError("lookback_years must be greater than zero.")
+
+    sim_start = pd.Timestamp(simulation_start).normalize()
+    sim_end = pd.Timestamp(simulation_end).normalize()
+    data_start_ts = pd.Timestamp(data_start).normalize() if data_start is not None else sim_start
+    data_end_ts = pd.Timestamp(data_end).normalize() if data_end is not None else sim_end
+
+    windows = build_rolling_windows(sim_start, sim_end, months=months)
+    model_root = Path(model_folder)
+    model_root.mkdir(parents=True, exist_ok=True)
+
+    history_cache = {}
+    results = []
+
+    fetch_start = min(data_start_ts, sim_start - pd.DateOffset(years=lookback_years))
+
+    for ticker in tickers:
+        df = load_ticker_data(
+            ticker,
+            start_date=str(fetch_start.date()),
+            end_date=str((data_end_ts + pd.Timedelta(days=1)).date()),
+        )
+        history_cache[ticker] = _clean_stock_frame(df)
+
+    for window_start, window_end in windows:
+        window_end_inclusive = window_end - pd.Timedelta(days=1)
+        train_start = window_start - pd.DateOffset(years=lookback_years)
+        print(
+            "Running rolling window "
+            f"{window_start.date()} -> {window_end_inclusive.date()} "
+            f"with lookback from {train_start.date()}"
+        )
+
+        for ticker in tickers:
+            df = history_cache.get(ticker, pd.DataFrame())
+            if df.empty:
+                continue
+
+            try:
+                ticker_folder = model_root / ticker
+                ticker_folder.mkdir(parents=True, exist_ok=True)
+                model_name = (
+                    f"{ticker}_{window_start.strftime('%Y%m%d')}_{window_end_inclusive.strftime('%Y%m%d')}"
+                    f"_lookback{lookback_years}y.h5"
+                )
+                model_path = ticker_folder / model_name
+
+                prepared = prepare_rolling_window_data(df=df, sequence_length=sequence_length, window_start=window_start, window_end=window_end, lookback_years=lookback_years)
+                if model_path.exists() and not force_retrain:
+                    reused = True
+                    saved = False
+                    print(
+                        f"Reusing existing model for {ticker} in window "
+                        f"{window_start.date()} -> {window_end_inclusive.date()}"
+                    )
+                else:
+                    model = _train_rolling_lstm_model(prepared["X_train"], prepared["y_train"], sequence_length)
+                    reused = False
+                    saved = False
+                    if save_models:
+                        model.save(model_path)
+                        saved = True
+                        print(
+                            f"Saved model for {ticker} in window "
+                            f"{window_start.date()} -> {window_end_inclusive.date()}"
+                        )
+
+                results.append(
+                    RollingModelSaveResult(
+                        window_start=window_start,
+                        window_end=window_end_inclusive,
+                        ticker=ticker,
+                        model_path=str(model_path),
+                        saved=saved,
+                        reused=reused,
+                    )
+                )
+            except Exception as exc:
+                print(f"[SKIP] {ticker} in window {window_start.date()} -> {window_end.date()}: {exc}")
+
+    if not results:
+        return pd.DataFrame(
+            columns=[
+                "window_start",
+                "window_end",
+                "ticker",
+                "model_path",
+                "saved",
+                "reused",
+            ]
+        )
+
+    return pd.DataFrame([result.__dict__ for result in results])
