@@ -17,11 +17,6 @@ from scr.data.load_data import (
     _normalize_columns,
     load_ticker_data,
 )
-from scr.trade.trading_strategy import (
-    moving_average_strategy,
-    rate_of_change_strategy,
-    rolling_std_deviation_strategy,
-)
 
 
 @dataclass
@@ -34,7 +29,7 @@ class RollingModelSaveResult:
     reused: bool
 
 
-def _clean_stock_frame(df: pd.DataFrame) -> pd.DataFrame:
+def _clean_stock_frame(df):
     """Normalize, clean and sort a price dataframe."""
     if df is None or df.empty:
         return pd.DataFrame()
@@ -52,7 +47,7 @@ def _clean_stock_frame(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _build_rolling_lstm_model(sequence_length: int, feature_dim: int) -> Sequential:
+def _build_rolling_lstm_model(sequence_length, feature_dim):
     """Build the LSTM used for rolling-window retraining."""
     model = Sequential()
     n_neurons = sequence_length * feature_dim
@@ -64,7 +59,7 @@ def _build_rolling_lstm_model(sequence_length: int, feature_dim: int) -> Sequent
     return model
 
 
-def _train_rolling_lstm_model(X: np.ndarray, y: np.ndarray, sequence_length: int) -> Sequential:
+def _train_rolling_lstm_model(X, y, sequence_length):
     """
     Train the LSTM on a fixed rolling history using a chronological validation split.
     """
@@ -98,11 +93,7 @@ def _train_rolling_lstm_model(X: np.ndarray, y: np.ndarray, sequence_length: int
     return model
 
 
-def build_rolling_windows(
-    simulation_start: str | pd.Timestamp,
-    simulation_end: str | pd.Timestamp,
-    months: int = 3,
-) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+def build_rolling_windows(simulation_start, simulation_end, months = 3):
     """
     Build fixed-length, non-overlapping windows of the simulation period.
 
@@ -111,7 +102,7 @@ def build_rolling_windows(
     start = pd.Timestamp(simulation_start).normalize()
     end_exclusive = pd.Timestamp(simulation_end).normalize() + pd.Timedelta(days=1)
 
-    windows: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    windows = []
     cursor = start
     while cursor < end_exclusive:
         next_cursor = cursor + pd.DateOffset(months=months)
@@ -122,13 +113,7 @@ def build_rolling_windows(
     return windows
 
 
-def _prepare_rolling_sequences(
-    df: pd.DataFrame,
-    sequence_length: int,
-    train_start: pd.Timestamp,
-    train_end: pd.Timestamp,
-    test_end: pd.Timestamp,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, MinMaxScaler, MinMaxScaler]:
+def _prepare_rolling_sequences(df, sequence_length, train_start, train_end, test_end):
     """
     Prepare train/test sequences for one rolling window.
 
@@ -171,10 +156,10 @@ def _prepare_rolling_sequences(
     X_scaled = x_scaler.transform(data.to_numpy(dtype=float))
     y_scaled = y_scaler.transform(close_prices.reshape(-1, 1)).flatten()
 
-    X_seq: List[np.ndarray] = []
-    y_seq: List[float] = []
-    seq_start_dates: List[pd.Timestamp] = []
-    seq_target_dates: List[pd.Timestamp] = []
+    X_seq = []
+    y_seq = []
+    seq_start_dates = []
+    seq_target_dates = []
 
     for i in range(sequence_length, len(X_scaled)):
         seq_start_dates.append(pd.Timestamp(row_dates[i - sequence_length]))
@@ -213,13 +198,7 @@ def _prepare_rolling_sequences(
     return X_train, y_train, X_test, y_test, x_scaler, y_scaler
 
 
-def prepare_rolling_window_data(
-    df: pd.DataFrame,
-    sequence_length: int,
-    window_start: str | pd.Timestamp,
-    window_end: str | pd.Timestamp,
-    lookback_years: int = 3,
-) -> Dict[str, np.ndarray | MinMaxScaler | pd.Timestamp]:
+def prepare_rolling_window_data(df, sequence_length, window_start, window_end, lookback_years = 3):
     """
     Build a train/test split for one rolling quarterly window.
 
@@ -229,13 +208,7 @@ def prepare_rolling_window_data(
     test_start = pd.Timestamp(window_start).normalize()
     test_end = pd.Timestamp(window_end).normalize()
     train_start = test_start - pd.DateOffset(years=lookback_years)
-    X_train, y_train, X_test, y_test, x_scaler, y_scaler = _prepare_rolling_sequences(
-        df=df,
-        sequence_length=sequence_length,
-        train_start=train_start,
-        train_end=test_start,
-        test_end=test_end,
-    )
+    X_train, y_train, X_test, y_test, x_scaler, y_scaler = _prepare_rolling_sequences(df=df, sequence_length=sequence_length, train_start=train_start, train_end=test_start, test_end=test_end,)
 
     return {
         "X_train": X_train,
@@ -249,108 +222,28 @@ def prepare_rolling_window_data(
     }
 
 
-def train_rolling_lstm_for_window(
-    df: pd.DataFrame,
-    sequence_length: int,
-    window_start: str | pd.Timestamp,
-    window_end: str | pd.Timestamp,
-    lookback_years: int = 3,
-):
+def train_rolling_lstm_for_window(df, sequence_length, window_start, window_end, lookback_years = 3):
     """
     Train a fresh LSTM on the fixed rolling history available before `window_start`.
     """
-    prepared = prepare_rolling_window_data(
-        df,
-        sequence_length,
-        window_start,
-        window_end,
-        lookback_years=lookback_years,
-    )
+    prepared = prepare_rolling_window_data(df, sequence_length, window_start, window_end, lookback_years=lookback_years)
     model = _train_rolling_lstm_model(prepared["X_train"], prepared["y_train"], sequence_length)
     return model, prepared
 
 
-def _align_series_to_min_length(
-    predictions: Dict[str, np.ndarray],
-    actuals: Dict[str, np.ndarray],
-) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray], int]:
-    if not predictions:
-        return {}, {}, 0
-
-    min_len = min(len(values) for values in predictions.values())
-    aligned_predictions = {ticker: values[:min_len] for ticker, values in predictions.items()}
-    aligned_actuals = {ticker: values[:min_len] for ticker, values in actuals.items()}
-    return aligned_predictions, aligned_actuals, min_len
-
-
-def _resolve_strategy_name(strategy: str | Callable) -> str:
-    if callable(strategy):
-        return getattr(strategy, "__name__", "custom_strategy")
-    return str(strategy)
-
-
-def _zero_signal_dict_like(predictions: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-    return {ticker: np.zeros(len(values), dtype=int) for ticker, values in predictions.items()}
-
-
-def _generate_trading_signals(
-    strategy: str | Callable,
-    predictions: Dict[str, np.ndarray],
-    actuals: Dict[str, np.ndarray],
-    strategy_kwargs: Optional[Dict] = None,
-) -> Dict[str, np.ndarray]:
-    """
-    Resolve a strategy name or callable into a signal dictionary.
-
-    Supported strategy names:
-    - "ma" / "moving_average"
-    - "roc" / "rate_of_change"
-    - "bb" / "rolling_std"
-    """
-    strategy_kwargs = strategy_kwargs or {}
-
-    if callable(strategy):
-        try:
-            return strategy(predictions, actuals, **strategy_kwargs)
-        except TypeError:
-            return strategy(predictions, **strategy_kwargs)
-
-    key = str(strategy).strip().lower()
-    if key in {"ma", "moving_average"}:
-        long_window = int(strategy_kwargs.get("long_window", 20))
-        if any(len(pred) < long_window for pred in predictions.values()):
-            return _zero_signal_dict_like(predictions)
-        return moving_average_strategy(predictions, **strategy_kwargs)
-    if key in {"roc", "rate_of_change"}:
-        window = int(strategy_kwargs.get("window", 14))
-        if any(len(pred) <= window for pred in predictions.values()):
-            return _zero_signal_dict_like(predictions)
-        return rate_of_change_strategy(predictions, **strategy_kwargs)
-    if key in {"bb", "bollinger", "rolling_std", "rolling_std_deviation"}:
-        window = int(strategy_kwargs.get("window", 20))
-        if any(len(pred) < window or len(actuals.get(ticker, [])) < window for ticker, pred in predictions.items()):
-            return _zero_signal_dict_like(predictions)
-        return rolling_std_deviation_strategy(predictions, actuals, **strategy_kwargs)
-
-    raise ValueError(
-        f"Unknown trading strategy '{strategy}'. "
-        "Use 'ma', 'roc', 'bb' or pass a callable."
-    )
-
-
 def train_and_save_rolling_quarterly_models(
-    tickers: Sequence[str],
-    simulation_start: str | pd.Timestamp,
-    simulation_end: str | pd.Timestamp,
-    sequence_length: int,
-    data_start: Optional[str | pd.Timestamp] = None,
-    data_end: Optional[str | pd.Timestamp] = None,
-    months: int = 3,
-    lookback_years: int = 3,
-    model_folder: str = "models/LSTM_rolling",
-    save_models: bool = True,
-    force_retrain: bool = False,
-) -> pd.DataFrame:
+    tickers,
+    simulation_start,
+    simulation_end,
+    sequence_length,
+    data_start = None,
+    data_end = None,
+    months = 3,
+    lookback_years = 3,
+    model_folder = "models/LSTM_rolling",
+    save_models = True,
+    force_retrain = False,
+):
     """
     Train and save one quarterly rolling LSTM model per ticker and window.
 
@@ -370,8 +263,8 @@ def train_and_save_rolling_quarterly_models(
     model_root = Path(model_folder)
     model_root.mkdir(parents=True, exist_ok=True)
 
-    history_cache: Dict[str, pd.DataFrame] = {}
-    results: List[RollingModelSaveResult] = []
+    history_cache = {}
+    results = []
 
     fetch_start = min(data_start_ts, sim_start - pd.DateOffset(years=lookback_years))
 
@@ -406,13 +299,7 @@ def train_and_save_rolling_quarterly_models(
                 )
                 model_path = ticker_folder / model_name
 
-                prepared = prepare_rolling_window_data(
-                    df=df,
-                    sequence_length=sequence_length,
-                    window_start=window_start,
-                    window_end=window_end,
-                    lookback_years=lookback_years,
-                )
+                prepared = prepare_rolling_window_data(df=df, sequence_length=sequence_length, window_start=window_start, window_end=window_end, lookback_years=lookback_years)
                 if model_path.exists() and not force_retrain:
                     reused = True
                     saved = False
@@ -421,11 +308,7 @@ def train_and_save_rolling_quarterly_models(
                         f"{window_start.date()} -> {window_end_inclusive.date()}"
                     )
                 else:
-                    model = _train_rolling_lstm_model(
-                        prepared["X_train"],
-                        prepared["y_train"],
-                        sequence_length,
-                    )
+                    model = _train_rolling_lstm_model(prepared["X_train"], prepared["y_train"], sequence_length)
                     reused = False
                     saved = False
                     if save_models:
@@ -462,7 +345,3 @@ def train_and_save_rolling_quarterly_models(
         )
 
     return pd.DataFrame([result.__dict__ for result in results])
-
-
-# Backward-compatible alias: keep the old name available for existing notebooks.
-run_rolling_quarterly_experiment = train_and_save_rolling_quarterly_models

@@ -995,6 +995,7 @@ def compute_timing_summaries(results):
             baseline_target_rate=("already_target", "mean"),
             mean_min_abs_delta_norm=("min_abs_delta_norm", "mean"),
             mean_abs_prediction_shift=("prediction_shift", lambda x: np.nanmean(np.abs(x))),
+            mean_delta_cr=("delta_final_cr", "mean"),
             trials=("success", "size"),
         )
     )
@@ -1005,15 +1006,18 @@ def compute_timing_summaries(results):
             attack_success_rate=("success", "mean"),
             baseline_target_rate=("already_target", "mean"),
             nontrivial_trials=("already_target", lambda x: int((~x).sum())),
+            mean_delta_cr=("delta_final_cr", "mean"),
             nontrivial_successes=("nontrivial_success", "sum"),
             mean_min_abs_delta_norm=("min_abs_delta_norm", "mean"),
         )
     )
+
     policy_summary["nontrivial_attack_success_rate"] = np.where(
         policy_summary["nontrivial_trials"] > 0,
         policy_summary["nontrivial_successes"] / policy_summary["nontrivial_trials"],
         np.nan,
     )
+
     return (
         timing_summary,
         policy_summary.sort_values("nontrivial_attack_success_rate", ascending=False),
