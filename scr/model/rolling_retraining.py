@@ -16,6 +16,7 @@ from scr.data.load_data import (
     _drop_repeated_header_row,
     _normalize_columns,
     load_ticker_data,
+    load_data_from_csv
 )
 
 

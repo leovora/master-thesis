@@ -84,7 +84,138 @@ def _resolve_data_folder(project_root, data_folder):
     return data_path if data_path.is_absolute() else Path(project_root) / data_path
 
 
-def preprocess_ticker_from_csv(ticker, sequence_length, project_root, data_folder="data/LSTM_3_years"):
+def _load_period_frame(ticker, project_root, data_folder, data_start, simulation_start, simulation_end):
+    resolved_data_folder = _resolve_data_folder(project_root, data_folder)
+    download_start = pd.Timestamp(data_start or simulation_start).normalize()
+    download_end = pd.Timestamp(simulation_end).normalize() + pd.Timedelta(days=1)
+
+    df = safe_download(ticker, str(download_start.date()), str(download_end.date()))
+    if df is None or df.empty:
+        csv_path = Path(resolved_data_folder) / "stock_data" / f"{ticker}_data.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Missing data for {ticker}: {csv_path}")
+        df = pd.read_csv(csv_path)
+
+    df = _normalize_stock_frame(df)
+    if df.empty:
+        raise ValueError(f"Empty dataframe for {ticker}")
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError(
+            f"Single-period evaluation for {ticker} requires dated data. "
+            "Use CSVs with a date/datetime column or allow yfinance download."
+        )
+    return df
+
+
+def _preprocess_ticker_for_period(
+    ticker,
+    sequence_length,
+    project_root,
+    data_folder,
+    simulation_start,
+    simulation_end,
+    data_start=None,
+):
+    df = _load_period_frame(
+        ticker=ticker,
+        project_root=project_root,
+        data_folder=data_folder,
+        data_start=data_start,
+        simulation_start=simulation_start,
+        simulation_end=simulation_end,
+    )
+
+    required_cols = ["open", "high", "low", "close", "volume"]
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        raise ValueError(f"Missing columns for {ticker}: {missing}")
+
+    data = df[FEATURES].apply(pd.to_numeric, errors="coerce").dropna()
+    if data.empty:
+        raise ValueError(f"No numeric rows available for {ticker}")
+
+    simulation_start_ts = pd.Timestamp(simulation_start).normalize()
+    simulation_end_ts = pd.Timestamp(simulation_end).normalize()
+    data_start_ts = pd.Timestamp(data_start).normalize() if data_start is not None else data.index.min().normalize()
+
+    close_prices = data["close"].to_numpy(dtype=float)
+    target_dates = pd.to_datetime(data.index).to_numpy()[1:]
+    X_raw = data.to_numpy(dtype=float)[:-1]
+    y_raw = close_prices[1:]
+
+    train_mask = (
+        (target_dates >= np.datetime64(data_start_ts))
+        & (target_dates < np.datetime64(simulation_start_ts))
+    )
+    if train_mask.sum() <= sequence_length:
+        raise ValueError(
+            f"Not enough pre-period training rows for {ticker} before {simulation_start_ts.date()}."
+        )
+
+    x_min = np.min(X_raw[train_mask], axis=0)
+    x_max = np.max(X_raw[train_mask], axis=0)
+    y_min = np.min(y_raw[train_mask])
+    y_max = np.max(y_raw[train_mask])
+    y_range = y_max - y_min if y_max != y_min else 1.0
+
+    X_norm = (X_raw - x_min) / (x_max - x_min + 1e-8)
+    y_norm = (y_raw - y_min) / (y_range + 1e-8)
+
+    X_seq = []
+    y_seq = []
+    seq_dates = []
+    for i in range(sequence_length, len(X_norm)):
+        X_seq.append(X_norm[i - sequence_length:i])
+        y_seq.append(float(y_norm[i]))
+        seq_dates.append(pd.Timestamp(target_dates[i]))
+
+    X_seq = np.asarray(X_seq, dtype=float)
+    y_seq = np.asarray(y_seq, dtype=float)
+    seq_dates = np.asarray(seq_dates, dtype="datetime64[ns]")
+    test_mask = (
+        (seq_dates >= np.datetime64(simulation_start_ts))
+        & (seq_dates <= np.datetime64(simulation_end_ts))
+    )
+
+    X_test = X_seq[test_mask]
+    y_test = y_seq[test_mask]
+    if len(X_test) == 0:
+        raise ValueError(
+            f"No single-model test sequences for {ticker} in "
+            f"[{simulation_start_ts.date()}, {simulation_end_ts.date()}]."
+        )
+
+    return {
+        "X_test": X_test,
+        "y_test": y_test,
+        "y_actual": y_test * y_range + y_min,
+        "y_min": y_min,
+        "y_max": y_max,
+        "y_range": y_range,
+        "data_folder": str(_resolve_data_folder(project_root, data_folder)),
+    }
+
+
+def preprocess_ticker_from_csv(
+    ticker,
+    sequence_length,
+    project_root,
+    data_folder="data/LSTM_3_years",
+    simulation_start=None,
+    simulation_end=None,
+    data_start=None,
+):
+    if simulation_start is not None and simulation_end is not None:
+        return _preprocess_ticker_for_period(
+            ticker=ticker,
+            sequence_length=sequence_length,
+            project_root=project_root,
+            data_folder=data_folder,
+            simulation_start=simulation_start,
+            simulation_end=simulation_end,
+            data_start=data_start,
+        )
+
     resolved_data_folder = _resolve_data_folder(project_root, data_folder)
     result = preprocess_data(ticker, start_date=None, end_date=None, sequence_length=sequence_length, source="csv", data_folder=str(resolved_data_folder))
     if result is None:
@@ -103,10 +234,33 @@ def preprocess_ticker_from_csv(ticker, sequence_length, project_root, data_folde
         "data_folder": str(resolved_data_folder),
     }
 
-def get_ticker_data(ticker, sequence_length, project_root, data_folder="data/LSTM_3_years"):
-    key = (ticker, sequence_length, str(_resolve_data_folder(project_root, data_folder)))
+def get_ticker_data(
+    ticker,
+    sequence_length,
+    project_root,
+    data_folder="data/LSTM_3_years",
+    simulation_start=None,
+    simulation_end=None,
+    data_start=None,
+):
+    key = (
+        ticker,
+        sequence_length,
+        str(_resolve_data_folder(project_root, data_folder)),
+        str(pd.Timestamp(simulation_start).normalize()) if simulation_start is not None else None,
+        str(pd.Timestamp(simulation_end).normalize()) if simulation_end is not None else None,
+        str(pd.Timestamp(data_start).normalize()) if data_start is not None else None,
+    )
     if key not in _DATA_CACHE:
-        _DATA_CACHE[key] = preprocess_ticker_from_csv(ticker, sequence_length, project_root, data_folder=data_folder)
+        _DATA_CACHE[key] = preprocess_ticker_from_csv(
+            ticker,
+            sequence_length,
+            project_root,
+            data_folder=data_folder,
+            simulation_start=simulation_start,
+            simulation_end=simulation_end,
+            data_start=data_start,
+        )
     return _DATA_CACHE[key]
 
 
@@ -316,8 +470,26 @@ def _segment_for_attack_day(segments, attack_day):
     return None, None
 
 
-def predict_ticker(ticker, model_folder, sequence_length, project_root, X_override=None, data_folder="data/LSTM_3_years"):
-    data = get_ticker_data(ticker, sequence_length, project_root, data_folder)
+def predict_ticker(
+    ticker,
+    model_folder,
+    sequence_length,
+    project_root,
+    X_override=None,
+    data_folder="data/LSTM_3_years",
+    simulation_start=None,
+    simulation_end=None,
+    data_start=None,
+):
+    data = get_ticker_data(
+        ticker,
+        sequence_length,
+        project_root,
+        data_folder,
+        simulation_start=simulation_start,
+        simulation_end=simulation_end,
+        data_start=data_start,
+    )
     X = data["X_test"] if X_override is None else X_override
     model = get_model(ticker, model_folder)
     pred_norm = model.predict(X, verbose=0).reshape(-1)
@@ -384,8 +556,19 @@ def get_predictions_and_actuals(
                 sequence_length,
                 project_root,
                 data_folder=data_folder,
+                simulation_start=simulation_start,
+                simulation_end=simulation_end,
+                data_start=data_start,
             )
-            actuals[ticker] = get_ticker_data(ticker, sequence_length, project_root, data_folder)["y_actual"]
+            actuals[ticker] = get_ticker_data(
+                ticker,
+                sequence_length,
+                project_root,
+                data_folder,
+                simulation_start=simulation_start,
+                simulation_end=simulation_end,
+                data_start=data_start,
+            )["y_actual"]
 
     if predictions:
         min_len = min(len(values) for values in predictions.values())
@@ -540,7 +723,15 @@ def evaluate_targeted_attack(
         X_original = segment["X_test"]
         baseline_attacked_pred = predictions_base[setup.attacked_ticker]
     else:
-        data = get_ticker_data(setup.attacked_ticker, sequence_length, project_root, data_folder)
+        data = get_ticker_data(
+            setup.attacked_ticker,
+            sequence_length,
+            project_root,
+            data_folder,
+            simulation_start=simulation_start,
+            simulation_end=simulation_end,
+            data_start=data_start,
+        )
         X_original = data["X_test"]
         baseline_attacked_pred = predictions_base[setup.attacked_ticker]
 
@@ -591,7 +782,17 @@ def evaluate_targeted_attack(
                     attacked_X[attack_day, -1, CLOSE_FEATURE_INDEX] + delta, 0.0, 1.0
                 )
 
-                attacked_pred = predict_ticker(setup.attacked_ticker, mf, sequence_length, project_root, X_override=attacked_X, data_folder=data_folder)
+                attacked_pred = predict_ticker(
+                    setup.attacked_ticker,
+                    mf,
+                    sequence_length,
+                    project_root,
+                    X_override=attacked_X,
+                    data_folder=data_folder,
+                    simulation_start=simulation_start,
+                    simulation_end=simulation_end,
+                    data_start=data_start,
+                )
 
         # Replace the target ticker's baseline predictions with adversarial ones
         predictions_attack = {t: v.copy() for t, v in predictions_base.items()}
