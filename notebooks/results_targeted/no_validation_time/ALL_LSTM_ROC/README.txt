@@ -1,0 +1,1 @@
+NOTA: in ALL_LSTM_ROC accidentalmente LSTM_rolling è stato eseguito con attacco per cumulative. Per cui i risultati non sono del tutto corretti. Inserisci i risultati corretti nel csv
