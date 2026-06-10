@@ -584,6 +584,28 @@ def final_cumulative_return(returns):
         return float("nan")
     return float(calculate_cumulative_returns(returns)[-1])
 
+def cumulative_return_in_period(returns, start_day, eval_cr_period):
+    """
+    Calculate the cumulative return for a specific period starting from start_day.
+    
+    Args:
+        returns: Array of returns (typically from simulate_trades_with_allocation)
+        start_day: Starting day index (0-based)
+        eval_cr_period: Number of days to evaluate (window size)
+    
+    Returns:
+        The cumulative return over the specified period, or nan if period is invalid
+    """
+    if len(returns) == 0:
+        return float("nan")
+    
+    end_day = min(start_day + eval_cr_period, len(returns))
+    if start_day >= len(returns) or end_day <= start_day:
+        return float("nan")
+    
+    period_returns = returns[start_day:end_day]
+    cumulative = calculate_cumulative_returns(period_returns)
+    return float(cumulative[-1]) if len(cumulative) > 0 else float("nan")
 
 # ---------------------------------------------------------------------------
 # Attack execution
@@ -631,6 +653,7 @@ def evaluate_targeted_attack(
     simulation_end=None,
     data_start=None,
     months=3,
+    eval_cr_period=10,
     train_mode="single",
     train_window_months=3,
     diagnostics=False,
@@ -805,6 +828,20 @@ def evaluate_targeted_attack(
         if attacked_signal == target_signal:
             # Store the first successful delta
             attacked_returns = simulate_trades_with_allocation(predictions_attack, actuals, signals_attack)
+            
+            # Calculate cumulative return in period from attack day to end
+            baseline_cr_period = cumulative_return_in_period(
+                baseline_returns, 
+                attack_day, 
+                eval_cr_period
+            )
+            attacked_cr_period = cumulative_return_in_period(
+                attacked_returns, 
+                attack_day, 
+                eval_cr_period
+            )
+            delta_cr_period = attacked_cr_period - baseline_cr_period
+            
             best = {
                 "attacked_signal": attacked_signal,
                 "min_delta_norm": delta,
@@ -814,6 +851,7 @@ def evaluate_targeted_attack(
                     - baseline_attacked_pred[attack_day]
                 ),
                 "delta_final_cr": final_cumulative_return(attacked_returns) - baseline_final_cr,
+                "delta_cumulative_return_in_period": delta_cr_period,
             }
             break
 
@@ -825,6 +863,7 @@ def evaluate_targeted_attack(
             "min_abs_delta_norm": float("nan"),
             "prediction_shift": float("nan"),
             "delta_final_cr": float("nan"),
+            "delta_cumulative_return_in_period": float("nan"),
         }
 
     attacked_signal = best["attacked_signal"]
@@ -856,6 +895,7 @@ def run_targeted_attack_experiment(
     simulation_end=None,
     data_start=None,
     months=3,
+    eval_cr_period = 10,
     train_mode="cumulative",
     train_window_months=3,
     diagnostics=False,
@@ -882,6 +922,7 @@ def run_targeted_attack_experiment(
                     simulation_end=simulation_end,
                     data_start=data_start,
                     months=months,
+                    eval_cr_period = eval_cr_period,
                     train_mode=train_mode,
                     train_window_months=train_window_months,
                     diagnostics=diagnostics,
@@ -1157,26 +1198,48 @@ def compute_summary_by_setup_and_timing(results):
     valid["success"] = valid["success"].astype(bool)
     valid["already_target"] = valid["already_target"].astype(bool)
     valid["nontrivial_success"] = valid["success"] & ~valid["already_target"]
+    
+    has_cr_period = "delta_cumulative_return_in_period" in valid.columns
+    if has_cr_period:
+        valid["cr_success"] = valid["delta_cumulative_return_in_period"] < 0
+        valid["nontrivial_cr_success"] = valid["nontrivial_success"] & valid["cr_success"]
+
+    agg_dict = {
+        "trials": ("success", "size"),
+        "attack_success_rate": ("success", "mean"),
+        "baseline_target_rate": ("already_target", "mean"),
+        "nontrivial_trials": ("already_target", lambda x: int((~x).sum())),
+        "nontrivial_successes": ("nontrivial_success", "sum"),
+        "mean_min_abs_delta_norm": ("min_abs_delta_norm", "mean"),
+        "median_min_abs_delta_norm": ("min_abs_delta_norm", "median"),
+        "mean_delta_final_cr": ("delta_final_cr", "mean"),
+    }
+    
+    if has_cr_period:
+        agg_dict.update({
+            "nontrivial_cr_success": ("nontrivial_cr_success", "sum"),
+            "mean_delta_cumulative_return_in_period": ("delta_cumulative_return_in_period", "mean"),
+            "median_delta_cumulative_return_in_period": ("delta_cumulative_return_in_period", "median"),
+        })
 
     summary = (
         valid.groupby(
             ["setup", "model", "strategy", "timing_policy", "objective"], as_index=False
-        ).agg(
-            trials=("success", "size"),
-            attack_success_rate=("success", "mean"),
-            baseline_target_rate=("already_target", "mean"),
-            nontrivial_trials=("already_target", lambda x: int((~x).sum())),
-            nontrivial_successes=("nontrivial_success", "sum"),
-            mean_min_abs_delta_norm=("min_abs_delta_norm", "mean"),
-            median_min_abs_delta_norm=("min_abs_delta_norm", "median"),
-            mean_delta_final_cr=("delta_final_cr", "mean"),
-        )
+        ).agg(**agg_dict)
     )
+    
     summary["nontrivial_attack_success_rate"] = np.where(
         summary["nontrivial_trials"] > 0,
         summary["nontrivial_successes"] / summary["nontrivial_trials"],
         np.nan,
     )
+    
+    if has_cr_period:
+        summary["cr_success_rate"] = np.where(
+            summary["nontrivial_successes"] > 0,
+            summary["nontrivial_cr_success"] / summary["nontrivial_successes"],
+            np.nan,
+        )
     return summary.sort_values(
         ["objective", "nontrivial_attack_success_rate", "attack_success_rate"],
         ascending=[True, False, False],
@@ -1188,29 +1251,54 @@ def compute_timing_summaries(results):
     valid["success"] = valid["success"].astype(bool)
     valid["already_target"] = valid["already_target"].astype(bool)
     valid["nontrivial_success"] = valid["success"] & ~valid["already_target"]
+    
+    has_cr_period = "delta_cumulative_return_in_period" in valid.columns
+    if has_cr_period:
+        valid["cr_success"] = valid["delta_cumulative_return_in_period"] < 0
+        valid["nontrivial_cr_success"] = valid["nontrivial_success"] & valid["cr_success"]
+
+    timing_agg_dict = {
+        "attack_success_rate": ("success", "mean"),
+        "nontrivial_attack_success_rate": ("nontrivial_success", "mean"),
+        "baseline_target_rate": ("already_target", "mean"),
+        "nontrivial_successes": ("nontrivial_success", "sum"),
+        "mean_min_abs_delta_norm": ("min_abs_delta_norm", "mean"),
+        "mean_abs_prediction_shift": ("prediction_shift", lambda x: np.nanmean(np.abs(x))),
+        "mean_delta_cr": ("delta_final_cr", "mean"),
+        "trials": ("success", "size"),
+    }
+    
+    if has_cr_period:
+        timing_agg_dict["nontrivial_cr_success"] = ("nontrivial_cr_success", "sum")
+        timing_agg_dict["mean_delta_cumulative_return_in_period"] = ("delta_cumulative_return_in_period", "mean")
 
     timing_summary = (
-        valid.groupby(["timing_policy", "attack_day"], as_index=False).agg(
-            attack_success_rate=("success", "mean"),
-            nontrivial_attack_success_rate=("nontrivial_success", "mean"),
-            baseline_target_rate=("already_target", "mean"),
-            mean_min_abs_delta_norm=("min_abs_delta_norm", "mean"),
-            mean_abs_prediction_shift=("prediction_shift", lambda x: np.nanmean(np.abs(x))),
-            mean_delta_cr=("delta_final_cr", "mean"),
-            trials=("success", "size"),
-        )
+        valid.groupby(["timing_policy", "attack_day"], as_index=False).agg(**timing_agg_dict)
     )
+    
+    if has_cr_period:
+        timing_summary["cr_success_rate"] = np.where(
+            timing_summary["nontrivial_successes"] > 0,
+            timing_summary["nontrivial_cr_success"] / timing_summary["nontrivial_successes"],
+            np.nan,
+        )
+
+    policy_agg_dict = {
+        "trials": ("success", "size"),
+        "attack_success_rate": ("success", "mean"),
+        "baseline_target_rate": ("already_target", "mean"),
+        "nontrivial_trials": ("already_target", lambda x: int((~x).sum())),
+        "mean_delta_cr": ("delta_final_cr", "mean"),
+        "nontrivial_successes": ("nontrivial_success", "sum"),
+        "mean_min_abs_delta_norm": ("min_abs_delta_norm", "mean"),
+    }
+    
+    if has_cr_period:
+        policy_agg_dict["nontrivial_cr_success"] = ("nontrivial_cr_success", "sum")
+        policy_agg_dict["mean_delta_cumulative_return_in_period"] = ("delta_cumulative_return_in_period", "mean")
 
     policy_summary = (
-        valid.groupby("timing_policy", as_index=False).agg(
-            trials=("success", "size"),
-            attack_success_rate=("success", "mean"),
-            baseline_target_rate=("already_target", "mean"),
-            nontrivial_trials=("already_target", lambda x: int((~x).sum())),
-            mean_delta_cr=("delta_final_cr", "mean"),
-            nontrivial_successes=("nontrivial_success", "sum"),
-            mean_min_abs_delta_norm=("min_abs_delta_norm", "mean"),
-        )
+        valid.groupby("timing_policy", as_index=False).agg(**policy_agg_dict)
     )
 
     policy_summary["nontrivial_attack_success_rate"] = np.where(
@@ -1218,6 +1306,13 @@ def compute_timing_summaries(results):
         policy_summary["nontrivial_successes"] / policy_summary["nontrivial_trials"],
         np.nan,
     )
+    
+    if has_cr_period:
+        policy_summary["cr_success_rate"] = np.where(
+            policy_summary["nontrivial_successes"] > 0,
+            policy_summary["nontrivial_cr_success"] / policy_summary["nontrivial_successes"],
+            np.nan,
+        )
 
     return (
         timing_summary,
@@ -1235,31 +1330,33 @@ def compute_summary_by_setup(results):
     valid["nontrivial_success"] = (
         valid["success"] & ~valid["already_target"]
     )
+    
+    has_cr_period = "delta_cumulative_return_in_period" in valid.columns
+    if has_cr_period:
+        valid["cr_success"] = valid["delta_cumulative_return_in_period"] < 0
+        valid["nontrivial_cr_success"] = valid["nontrivial_success"] & valid["cr_success"]
+
+    agg_dict = {
+        "trials": ("success", "size"),
+        "attack_success_rate": ("success", "mean"),
+        "baseline_target_rate": ("already_target", "mean"),
+        "nontrivial_trials": ("already_target", lambda x: int((~x).sum())),
+        "nontrivial_successes": ("nontrivial_success", "sum"),
+        "mean_min_abs_delta_norm": ("min_abs_delta_norm", "mean"),
+        "median_min_abs_delta_norm": ("min_abs_delta_norm", "median"),
+        "mean_delta_final_cr": ("delta_final_cr", "mean"),
+    }
+    
+    if has_cr_period:
+        agg_dict.update({
+            "nontrivial_cr_success": ("nontrivial_cr_success", "sum"),
+            "mean_delta_cumulative_return_in_period": ("delta_cumulative_return_in_period", "mean"),
+            "median_delta_cumulative_return_in_period": ("delta_cumulative_return_in_period", "median"),
+        })
 
     summary = (
         valid.groupby("setup", as_index=False)
-        .agg(
-            trials=("success", "size"),
-            attack_success_rate=("success", "mean"),
-            baseline_target_rate=("already_target", "mean"),
-            nontrivial_trials=(
-                "already_target",
-                lambda x: int((~x).sum())
-            ),
-            nontrivial_successes=("nontrivial_success", "sum"),
-            mean_min_abs_delta_norm=(
-                "min_abs_delta_norm",
-                "mean",
-            ),
-            median_min_abs_delta_norm=(
-                "min_abs_delta_norm",
-                "median",
-            ),
-            mean_delta_final_cr=(
-                "delta_final_cr",
-                "mean",
-            ),
-        )
+        .agg(**agg_dict)
     )
 
     summary["nontrivial_attack_success_rate"] = np.where(
@@ -1268,6 +1365,14 @@ def compute_summary_by_setup(results):
         / summary["nontrivial_trials"],
         np.nan,
     )
+    
+    if has_cr_period:
+        summary["cr_success_rate"] = np.where(
+            summary["nontrivial_successes"] > 0,
+            summary["nontrivial_cr_success"]
+            / summary["nontrivial_successes"],
+            np.nan,
+        )
 
     summary = summary.sort_values(
         [
