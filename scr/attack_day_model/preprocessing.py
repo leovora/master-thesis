@@ -47,6 +47,23 @@ TECHNICAL_FEATURE_COLUMNS = [
     "volume_ratio",
 ]
 
+ENGINEERED_FEATURE_NAMES = [
+    # Volatility regime
+    "vol_ratio_5_20", "vol_spread", "bb_atr_ratio",
+    # Trend ambiguity
+    "rsi_neutrality", "trend_strength_sq", "macd_sign", "return_reversal",
+    # Interactions
+    "vol_x_weak_trend", "vol_x_low_volume", "rsi_neutral_x_atr", "bb_breakout",
+    # Lag-derived
+    "lag_mean_return", "lag_return_std", "lag_return_autocorr",
+    "trend_break", "close_zscore", "volume_zscore", "volume_trend",
+    "doji_score", "hl_range_mean",
+    # Calendar
+    "is_monday", "is_friday", "is_quarter_end_month",
+    # Composite
+    "vulnerability_score",
+]
+
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -678,7 +695,7 @@ def build_model_input_dataframe(
 def chronological_train_test_split(
     feature_df: pd.DataFrame,
     *,
-    split_column: str = "attack_date",
+    split_column: str = "attack_day",
     test_size: float = 0.2,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Chronological split helper for the enriched feature table."""
@@ -758,3 +775,170 @@ def feature_correlation_analysis(
     print(corr_with_target.head(top_k))
 
     return corr_with_target
+
+# ---------------------------------------------------------------------------
+# Engineered features
+# ---------------------------------------------------------------------------
+
+def engineer_features(X: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build additional features from the existing feature matrix.
+
+    The goal is to capture market conditions that make an adversarial attack
+    more likely to succeed.
+      - Anomaly / z-score features: how unusual is today vs recent history?
+      - Volatility regime: is the market in a noisy, hard-to-predict state?
+      - Interaction features: conditions that jointly favour attack success
+      - Lag-derived features: autocorrelation, trend breaks, candle patterns
+        extracted from the 20 OHLCV lags already present in X
+    """
+    df = X.copy()
+
+    # 1. VOLATILITY REGIME FEATURES
+
+    # Ratio between short-term and long-term volatility.
+    # > 1  →  volatility expanding (regime change, good for attack)
+    # < 1  →  volatility contracting (calm market, harder to fool)
+    df["vol_ratio_5_20"] = df["volatility_5d"] / (df["volatility_20d"] + 1e-8)
+
+    # Absolute level: how far is 5d vol from the "normal" 20d vol?
+    df["vol_spread"] = df["volatility_5d"] - df["volatility_20d"]
+
+    # Bollinger width normalised by ATR — captures relative band expansion
+    df["bb_atr_ratio"] = df["bollinger_width_20"] / (df["atr_14"] + 1e-8)
+
+    # 2. TREND AMBIGUITY FEATURES
+
+    # RSI distance from neutrality (50): close to 50 = no momentum = ambiguous
+    df["rsi_neutrality"] = 1.0 - (df["rsi_14"] - 50).abs() / 50.0
+
+    # Trend strength squared: penalises weak trends more
+    df["trend_strength_sq"] = df["trend_strength"] ** 2
+
+    # MACD sign: positive = uptrend, negative = downtrend
+    df["macd_sign"] = np.sign(df["macd"])
+
+    # Return reversal: short return opposing long return = unstable trend
+    df["return_reversal"] = -np.sign(df["return_1d"]) * np.sign(df["return_10d"])
+
+    # 3. INTERACTION FEATURES
+
+    # High volatility + weak trend = ideal attack conditions
+    df["vol_x_weak_trend"] = df["volatility_5d"] * (1.0 - df["trend_strength"].abs())
+
+    # High vol + low volume = thin, noisy market
+    df["vol_x_low_volume"] = df["volatility_5d"] * (1.0 / (df["volume_ratio"] + 1e-8))
+
+    # RSI neutrality + high ATR = uncertain direction + large moves
+    df["rsi_neutral_x_atr"] = df["rsi_neutrality"] * df["atr_14"]
+
+    # Bollinger squeeze broken: high bb_width + high vol = breakout regime
+    df["bb_breakout"] = df["bollinger_width_20"] * df["volatility_5d"]
+
+    # 4. OHLCV-LAG DERIVED FEATURES
+
+    close_cols  = [f"ohlcv_lag_{i}_close_rel"  for i in range(20)]
+    volume_cols = [f"ohlcv_lag_{i}_volume_rel" for i in range(20)]
+    high_cols   = [f"ohlcv_lag_{i}_high_rel"   for i in range(20)]
+    low_cols    = [f"ohlcv_lag_{i}_low_rel"    for i in range(20)]
+
+    available_close  = [c for c in close_cols  if c in df.columns]
+    available_volume = [c for c in volume_cols if c in df.columns]
+    available_high   = [c for c in high_cols   if c in df.columns]
+    available_low    = [c for c in low_cols    if c in df.columns]
+
+    if available_close:
+        close_series = df[available_close]
+
+        # Average daily return over the window (lag 0 = today, lag 1 = yesterday)
+        # close_rel values are already relative to current close, so
+        # differences approximate daily returns.
+        close_diffs = close_series.diff(axis=1).iloc[:, 1:]
+        df["lag_mean_return"]    = close_diffs.mean(axis=1)
+        df["lag_return_std"]     = close_diffs.std(axis=1)   # realised vol in window
+
+        # Autocorrelation of returns (lag-1): positive = momentum, negative = reversal
+        def _autocorr_row(row):
+            r = row.dropna().values
+            if len(r) < 4:
+                return 0.0
+            return float(pd.Series(r).autocorr(lag=1) or 0.0)
+
+        df["lag_return_autocorr"] = close_diffs.apply(_autocorr_row, axis=1)
+
+        # Trend break: is the most recent 5-day return opposing the prior 15-day return?
+        if len(available_close) >= 16:
+            recent_ret   = df[available_close[0]]  - df[available_close[4]]   # last 5 days
+            prior_ret    = df[available_close[5]]  - df[available_close[15]]  # days 5-15
+            df["trend_break"] = (-np.sign(recent_ret) * np.sign(prior_ret)).astype(float)
+        else:
+            df["trend_break"] = 0.0
+
+        # Z-score of today's close relative to the 20-day window
+        rolling_mean = close_series.mean(axis=1)
+        rolling_std  = close_series.std(axis=1)
+        df["close_zscore"] = (
+            (df[available_close[0]] - rolling_mean) / (rolling_std + 1e-8)
+        )
+
+    if available_volume:
+        volume_series = df[available_volume]
+        # Volume z-score: unusually high/low volume signals anomalous activity
+        vol_mean = volume_series.mean(axis=1)
+        vol_std  = volume_series.std(axis=1)
+        df["volume_zscore"] = (
+            (df[available_volume[0]] - vol_mean) / (vol_std + 1e-8)
+        )
+        # Volume trend: is volume increasing or decreasing over the window?
+        if len(available_volume) >= 5:
+            df["volume_trend"] = (
+                df[available_volume[:5]].mean(axis=1)
+                - df[available_volume[5:10]].mean(axis=1)
+                if len(available_volume) >= 10
+                else df[available_volume[0]] - df[available_volume[-1]]
+            )
+
+    if available_high and available_low and available_close:
+        # Average candle body size relative to range (doji detection)
+        # Small body + large range = indecision candle = ambiguous market
+        open_cols = [f"ohlcv_lag_{i}_open_rel" for i in range(20)]
+        available_open = [c for c in open_cols if c in df.columns]
+        if available_open:
+            body   = (df[available_close[0]] - df[available_open[0]]).abs()
+            candle_range = df[available_high[0]] - df[available_low[0]] + 1e-8
+            df["doji_score"] = 1.0 - (body / candle_range)  # 1 = full doji, 0 = marubozu
+
+        # High-low range normalised: large range = high intraday uncertainty
+        df["hl_range_mean"] = (
+            df[available_high].values - df[available_low].values
+        ).mean(axis=1)
+
+    # 5. CALENDAR INTERACTION FEATURES
+
+    # Monday (0) and Friday (4) often have anomalous return patterns
+    df["is_monday"] = (df["day_of_week"] == 0).astype(int)
+    df["is_friday"] = (df["day_of_week"] == 4).astype(int)
+
+    # End of quarter: window dressing increases volatility
+    df["is_quarter_end_month"] = df["month"].isin([3, 6, 9, 12]).astype(int)
+
+    # 6. COMPOSITE VULNERABILITY SCORE
+    
+    score_components = []
+    if "vol_ratio_5_20"   in df.columns: score_components.append(_minmax(df["vol_ratio_5_20"]))
+    if "rsi_neutrality"   in df.columns: score_components.append(df["rsi_neutrality"])
+    if "bb_atr_ratio"     in df.columns: score_components.append(_minmax(df["bb_atr_ratio"]))
+    if "trend_break"      in df.columns: score_components.append((df["trend_break"] + 1) / 2)
+
+    if score_components:
+        df["vulnerability_score"] = sum(score_components) / len(score_components)
+
+    return df
+
+
+def _minmax(s: pd.Series) -> pd.Series:
+    """Min-max scale a series to [0, 1]; returns 0.5 if constant."""
+    mn, mx = s.min(), s.max()
+    if mx == mn:
+        return pd.Series(0.5, index=s.index)
+    return (s - mn) / (mx - mn)
