@@ -14,9 +14,13 @@ DEFAULT_EVENT_LOG_PATH = Path("data/attack_dataset/attack_dataset.csv")
 DEFAULT_PRICE_DATA_FOLDER = Path("data/validation_time")
 
 NON_FEATURE_COLUMNS = {
+    "attack_day",
     "attack_date",
     "target",
     "target_label",
+    "target_signal",
+    "baseline_signal",
+    "attacked_signal",
     "success",
     "already_target",
     "valid",
@@ -227,6 +231,26 @@ def load_attack_event_log(
     if drop_already_target and "already_target" in df.columns:
         mask = ~df["already_target"].astype(str).str.lower().isin({"true", "1", "yes"})
         df = df[mask].copy()
+
+    if "success" in df.columns:
+        success_mask = df["success"].astype(str).str.lower().isin({"true", "1", "yes"})
+        failed_mask = ~success_mask
+
+        zero_fill_cols = [
+            "min_delta_norm",
+            "min_abs_delta_norm",
+            "prediction_shift",
+            "delta_final_cr",
+            "delta_cumulative_return_in_period",
+        ]
+        for col in zero_fill_cols:
+            if col in df.columns:
+                df.loc[failed_mask, col] = pd.to_numeric(df.loc[failed_mask, col], errors="coerce").fillna(0.0)
+
+        if "baseline_signal" in df.columns and "attacked_signal" in df.columns:
+            df.loc[failed_mask, "attacked_signal"] = df.loc[failed_mask, "baseline_signal"]
+        if "baseline_label" in df.columns and "attacked_label" in df.columns:
+            df.loc[failed_mask, "attacked_label"] = df.loc[failed_mask, "baseline_label"]
 
     return df.reset_index(drop=True)
 

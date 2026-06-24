@@ -31,6 +31,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from scr.attack_day_model.preprocessing import engineer_features, ENGINEERED_FEATURE_NAMES
+
 import numpy as np
 import pandas as pd
 from imblearn.over_sampling import SMOTE
@@ -49,16 +51,6 @@ from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_sample_weight
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -126,15 +118,18 @@ class ImbalanceStrategy(str, Enum):
 # Data loading helpers
 # ---------------------------------------------------------------------------
 
-def load_X(path: str | Path) -> pd.DataFrame:
-    """Load the feature matrix from a semicolon-separated CSV."""
+def load_X(path, logger, engineer = True) -> pd.DataFrame:
+    """Load the feature matrix from a semicolon-separated CSV"""
     df = pd.read_csv(path, sep=X_SEP)
     logger.info("Loaded X from '%s' – shape %s", path, df.shape)
-    _validate_X(df)
+    _validate_X(df, logger)
+    if engineer:
+        df = engineer_features(df)
+        logger.info("Applied feature engineering – new shape %s", df.shape)
     return df
 
 
-def load_y(path: str | Path) -> pd.Series:
+def load_y(path, logger) -> pd.Series:
     """Load the target vector from a CSV (single column 'target')."""
     df = pd.read_csv(path)
     if TARGET_COL not in df.columns:
@@ -161,7 +156,7 @@ def load_y(path: str | Path) -> pd.Series:
     return y
 
 
-def _validate_X(df: pd.DataFrame) -> None:
+def _validate_X(df, logger) -> None:
     missing = [f for f in ALL_FEATURES if f not in df.columns]
     if missing:
         logger.warning(
@@ -175,6 +170,7 @@ def _validate_X(df: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 
 def build_model(
+    logger,
     model_type: str = "gradient_boosting",
     imbalance_strategy: ImbalanceStrategy = ImbalanceStrategy.CLASS_WEIGHT,
 ) -> Pipeline | ImbPipeline:
@@ -240,8 +236,7 @@ def build_model(
 # ---------------------------------------------------------------------------
 
 def train(
-    X: pd.DataFrame,
-    y: pd.Series,
+    logger,
     model_type: str = "gradient_boosting",
     imbalance_strategy: ImbalanceStrategy = ImbalanceStrategy.CLASS_WEIGHT,
     test_size: float = 0.2,
@@ -298,18 +293,10 @@ def train(
         logger.info(
             "Using pre-computed split → train: %d | test: %d  "
             "(attack in train: %d, in test: %d)",
-            len(X_train), len(X_test), y_train.sum(), y_test.sum(),
-        )
-    else:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=test_size, stratify=y, random_state=random_state,
-        )
-        logger.info(
-            "Random split → train: %d | test: %d  (attack in test: %d)",
-            len(X_train), len(X_test), y_test.sum(),
+            len(X_train), len(X_test), y_train.sum(), y_test.sum()
         )
  
-    pipeline = build_model(model_type, imbalance_strategy)
+    pipeline = build_model(model_type=model_type, imbalance_strategy=imbalance_strategy, logger=logger)
  
     # Cross-validation on train set
     if cv_strategy == "temporal":
@@ -345,7 +332,7 @@ def train(
     pipeline.fit(X_train, y_train, **fit_params)
     logger.info("Model fitted.")
  
-    metrics = evaluate(pipeline, X_test, y_test)
+    metrics = evaluate(pipeline, X_test, y_test, logger)
     return pipeline, metrics
 
 
@@ -357,6 +344,7 @@ def evaluate(
     pipeline: Pipeline | ImbPipeline,
     X: pd.DataFrame,
     y: pd.Series,
+    logger,
     threshold: float = 0.5,
 ) -> dict:
     """
@@ -402,6 +390,7 @@ def find_best_threshold(
     pipeline: Pipeline | ImbPipeline,
     X: pd.DataFrame,
     y: pd.Series,
+    logger,
     metric: str = "f1",
     thresholds: Optional[np.ndarray] = None,
 ) -> tuple[float, float]:
@@ -472,7 +461,7 @@ def predict(
 # Persistence
 # ---------------------------------------------------------------------------
 
-def save_model(pipeline: Pipeline | ImbPipeline, path: str | Path) -> None:
+def save_model(pipeline: Pipeline | ImbPipeline, path: str | Path, logger) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
@@ -480,7 +469,7 @@ def save_model(pipeline: Pipeline | ImbPipeline, path: str | Path) -> None:
     logger.info("Model saved to '%s'.", path)
 
 
-def load_model(path: str | Path) -> Pipeline | ImbPipeline:
+def load_model(path: str | Path, logger) -> Pipeline | ImbPipeline:
     with open(path, "rb") as f:
         pipeline = pickle.load(f)
     logger.info("Model loaded from '%s'.", path)
