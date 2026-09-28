@@ -1,27 +1,3 @@
-"""
-Binary classifier to predict whether an adversarial attack is effective
-on a given trading day.
-
-Labels
-------
-  0 → "non attack"  (attack NOT effective)
-  1 → "attack"      (attack IS effective)
-
-Input (X)
----------
-  114 features per day, semicolon-separated CSV:
-  - Calendar:        day_of_week, month, quarter
-  - Returns:         return_1d, return_5d, return_10d
-  - Volatility:      volatility_5d, volatility_20d
-  - Technical:       rsi_14, atr_14, bollinger_width_20, macd,
-                     trend_strength, volume_ratio
-  - OHLCV lags 0-19: ohlcv_lag_N_{open,high,low,close,volume}_rel
-
-Output (y)
-----------
-  Single column "target": 0 or 1
-"""
-
 from __future__ import annotations
 
 import logging
@@ -85,33 +61,12 @@ ALL_FEATURES = (
 
 class ImbalanceStrategy(str, Enum):
     """Strategy to handle class imbalance during training."""
+    
     NONE = "none"
-    """No correction. Use only if classes are roughly balanced."""
-
     CLASS_WEIGHT = "class_weight"
-    """
-    Penalise errors on the minority class more heavily during training.
-    - RandomForest / LogisticRegression: native class_weight="balanced"
-    - GradientBoosting: achieved via sample_weight in fit()
-    """
-
     SMOTE = "smote"
-    """
-    Synthetic Minority Over-sampling TEchnique.
-    Generates synthetic 'attack' samples by interpolating existing ones.
-    Applied inside the cross-validation fold to avoid data leakage.
-    """
-
     UNDERSAMPLE = "undersample"
-    """
-    Randomly removes 'non attack' samples to rebalance the dataset.
-    Fast; loses information from the majority class.
-    """
-
     SMOTE_UNDERSAMPLE = "smote_undersample"
-    """
-    Combines SMOTE (oversample minority) + RandomUnderSampler (reduce majority).
-    """
 
 
 # ---------------------------------------------------------------------------
@@ -251,36 +206,6 @@ def train(
 ) -> tuple[Pipeline | ImbPipeline, dict]:
     """
     Train the attack-detection model.
- 
-    Parameters
-    ----------
-    X : pd.DataFrame
-        Ignored when pre-split data is provided.
-    y : pd.Series
-        Ignored when pre-split data is provided.
-    model_type : str
-        Classifier variant.
-    imbalance_strategy : ImbalanceStrategy
-        Strategy for handling class imbalance.
-    test_size : float
-        Ignored when pre-split data is provided.
-    cv_folds : int
-    cv_scoring : str
-        Metric optimised during CV. Recommended: "f1", "roc_auc",
-        "average_precision".
-    cv_strategy : str
-        Cross-validation strategy on the training set.
-        - "temporal"
-        - "stratified"
-    random_state : int
-    X_train, X_test, y_train, y_test : optional
-        Pre-computed splits. When all four are
-        provided the internal train_test_split is skipped entirely.
- 
-    Returns
-    -------
-    pipeline : fitted Pipeline/ImbPipeline
-    metrics  : evaluation dict from evaluate()
     """
     if cv_strategy not in ("temporal", "stratified"):
         raise ValueError(
@@ -348,14 +273,7 @@ def evaluate(
     threshold: float = 0.5,
 ) -> dict:
     """
-    Evaluate the model on a labelled dataset.
-
-    Parameters
-    ----------
-    threshold : float
-        Decision threshold for the "attack" class.
-        Lower → higher recall, more false positives.
-        Tip: sweep from 0.2 to 0.7 to find the best operating point.
+    Evaluate the model on a labelled dataset
     """
     y_proba = pipeline.predict_proba(X)[:, 1]
     y_pred = (y_proba >= threshold).astype(int)
@@ -395,15 +313,7 @@ def find_best_threshold(
     thresholds: Optional[np.ndarray] = None,
 ) -> tuple[float, float]:
     """
-    Sweep decision thresholds and return the one maximising `metric`.
-
-    Parameters
-    ----------
-    metric : str
-        "f1", "recall", or "precision" on the attack class.
-    thresholds : array-like, optional
-        Values to try. Default: 0.05 to 0.95 step 0.05.
-
+    Sweep decision thresholds and return the one maximising `metric`
     """
     if thresholds is None:
         thresholds = np.arange(0.05, 0.96, 0.05)
