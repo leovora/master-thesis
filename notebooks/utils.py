@@ -212,12 +212,104 @@ def preprocess_data_transformer(ticker, start_date, end_date, sequence_length, s
     # to the correct base day without introducing a one-step shift.
     return (X_train_seq, y_train_seq, X_test_seq, y_test_seq, y_scaler, close_prices)
     
+# Explicit curl_cffi browser profiles to try, in order. yfinance's default
+# ("chrome" -> latest alias) can resolve to a profile the installed libcurl
+# build does not support (e.g. "Impersonating chrome150 is not supported").
+IMPERSONATE_PROFILES = ["chrome124", "chrome120", "chrome116", "chrome110", "safari17_0", "chrome"]
+_UNSET = object()
+_yf_session = _UNSET
+
+
+def _get_yf_session():
+    """Return a curl_cffi session with a working impersonation profile, or None
+    if curl_cffi cannot impersonate any browser in this environment. Probed once."""
+    global _yf_session
+    if _yf_session is not _UNSET:
+        return _yf_session
+    _yf_session = None
+    try:
+        from curl_cffi import requests as cffi_requests
+    except Exception as e:
+        print(f"[yfinance] curl_cffi not importable: {e}")
+        return None
+    for profile in IMPERSONATE_PROFILES:
+        try:
+            session = cffi_requests.Session(impersonate=profile)
+        except Exception:
+            continue
+        try:
+            session.get("https://query1.finance.yahoo.com", timeout=10)
+        except Exception as e:
+            if "mpersonat" in str(e):
+                continue
+            # Network/HTTP error unrelated to impersonation: the profile itself works.
+        print(f"[yfinance] using browser profile: {profile}")
+        _yf_session = session
+        return session
+    print("[yfinance] curl_cffi cannot impersonate any browser here; "
+          "falling back to the Yahoo chart API via requests")
+    return None
+
+
+def _download_yahoo_chart(ticker, start, end):
+    """Fetch daily OHLCV straight from Yahoo's chart API (no curl_cffi needed).
+    Returns a frame shaped like yf.download(..., auto_adjust=False)."""
+    import requests
+    params = {
+        "period1": int(pd.Timestamp(start, tz="UTC").timestamp()),
+        "period2": int(pd.Timestamp(end, tz="UTC").timestamp()),
+        "interval": "1d",
+        "events": "div,splits",
+        "includeAdjustedClose": "true",
+    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+    for host in ("query1", "query2"):
+        try:
+            resp = requests.get(f"https://{host}.finance.yahoo.com/v8/finance/chart/{ticker}",
+                                params=params, headers=headers, timeout=20)
+            resp.raise_for_status()
+            result = resp.json()["chart"]["result"][0]
+        except Exception as e:
+            print(f"[yahoo-chart] {host} failed for {ticker}: {e}")
+            continue
+        if not result.get("timestamp"):
+            return None
+        quote = result["indicators"]["quote"][0]
+        adjclose = result["indicators"].get("adjclose", [{}])[0].get("adjclose", quote["close"])
+        tz = result.get("meta", {}).get("exchangeTimezoneName", "America/New_York")
+        index = (pd.to_datetime(result["timestamp"], unit="s", utc=True)
+                 .tz_convert(tz).normalize().tz_localize(None))
+        df = pd.DataFrame({
+            "Open": quote["open"],
+            "High": quote["high"],
+            "Low": quote["low"],
+            "Close": quote["close"],
+            "Adj Close": adjclose,
+            "Volume": quote["volume"],
+        }, index=pd.DatetimeIndex(index, name="Date"))
+        return df.dropna(subset=["Close"])
+    return None
+
+
 def safe_download(ticker, start, end, retries=3):
+    session = _get_yf_session()
     for i in range(retries):
-        df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
+        if session is not None:
+            try:
+                df = yf.download(ticker, start=start, end=end, progress=False,
+                                 auto_adjust=False, session=session)
+            except Exception as e:
+                print(f"[yfinance] download failed for {ticker}: {e}")
+                df = None
+        else:
+            df = _download_yahoo_chart(ticker, start, end)
         if df is not None and not df.empty:
             return df
         time.sleep(1)
+    # yfinance returned nothing even with a working session: try the direct API once.
+    if session is not None:
+        return _download_yahoo_chart(ticker, start, end)
     return None
 
 
