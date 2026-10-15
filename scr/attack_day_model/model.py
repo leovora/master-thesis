@@ -128,6 +128,7 @@ def build_model(
     logger,
     model_type: str = "gradient_boosting",
     imbalance_strategy: ImbalanceStrategy = ImbalanceStrategy.CLASS_WEIGHT,
+    random_state: int = 42,
 ) -> Pipeline | ImbPipeline:
     
     use_balanced_weight = imbalance_strategy == ImbalanceStrategy.CLASS_WEIGHT
@@ -139,7 +140,7 @@ def build_model(
             max_depth=4,
             subsample=0.8,
             min_samples_split=10,
-            random_state=42,
+            random_state=random_state,
             # GradientBoosting does not support class_weight natively;
             # sample_weight is injected at fit() time when CLASS_WEIGHT is used.
         ),
@@ -148,13 +149,13 @@ def build_model(
             max_depth=8,
             min_samples_split=10,
             class_weight="balanced" if use_balanced_weight else None,
-            random_state=42,
+            random_state=random_state,
             n_jobs=-1,
         ),
         "logistic_regression": LogisticRegression(
             max_iter=1000,
             class_weight="balanced" if use_balanced_weight else None,
-            random_state=42,
+            random_state=random_state,
         ),
     }
 
@@ -169,9 +170,9 @@ def build_model(
     # --- Resampling steps (only for SMOTE / UNDERSAMPLE strategies) ----------
     resamplers = []
     if imbalance_strategy in (ImbalanceStrategy.SMOTE, ImbalanceStrategy.SMOTE_UNDERSAMPLE):
-        resamplers.append(("smote", SMOTE(random_state=42)))
+        resamplers.append(("smote", SMOTE(random_state=random_state)))
     if imbalance_strategy in (ImbalanceStrategy.UNDERSAMPLE, ImbalanceStrategy.SMOTE_UNDERSAMPLE):
-        resamplers.append(("undersampler", RandomUnderSampler(random_state=42)))
+        resamplers.append(("undersampler", RandomUnderSampler(random_state=random_state)))
 
     steps = [("scaler", StandardScaler())] + resamplers + [("clf", clf)]
 
@@ -221,7 +222,7 @@ def train(
             len(X_train), len(X_test), y_train.sum(), y_test.sum()
         )
  
-    pipeline = build_model(model_type=model_type, imbalance_strategy=imbalance_strategy, logger=logger)
+    pipeline = build_model(model_type=model_type, imbalance_strategy=imbalance_strategy, logger=logger, random_state=random_state)
  
     # Cross-validation on train set
     if cv_strategy == "temporal":
