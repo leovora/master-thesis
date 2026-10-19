@@ -2,6 +2,7 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import time
+import requests
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -212,9 +213,62 @@ def preprocess_data_transformer(ticker, start_date, end_date, sequence_length, s
     # to the correct base day without introducing a one-step shift.
     return (X_train_seq, y_train_seq, X_test_seq, y_test_seq, y_scaler, close_prices)
     
-def safe_download(ticker, start, end, retries=3):
+def _download_from_yahoo_api(ticker, start, end, timeout=30):
+    """Download daily OHLCV data directly from Yahoo Finance's chart API."""
+    period1 = int(pd.Timestamp(start, tz="UTC").timestamp())
+    period2 = int(pd.Timestamp(end, tz="UTC").timestamp())
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    response = requests.get(
+        url,
+        params={
+            "period1": period1,
+            "period2": period2,
+            "interval": "1d",
+            "events": "history",
+            "includeAdjustedClose": "true",
+        },
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    chart = payload.get("chart", {})
+    if chart.get("error"):
+        raise RuntimeError(chart["error"])
+
+    results = chart.get("result") or []
+    if not results:
+        return pd.DataFrame()
+
+    result = results[0]
+    timestamps = result.get("timestamp") or []
+    quote = (result.get("indicators", {}).get("quote") or [{}])[0]
+    if not timestamps:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(
+        {
+            "open": quote.get("open", []),
+            "high": quote.get("high", []),
+            "low": quote.get("low", []),
+            "close": quote.get("close", []),
+            "volume": quote.get("volume", []),
+        },
+        index=pd.to_datetime(timestamps, unit="s", utc=True).tz_localize(None),
+    )
+    frame.index.name = "date"
+    return frame.dropna(subset=["open", "high", "low", "close"])
+
+
+def safe_download(ticker, start, end, retries=3, use_yahoo_api=False):
     for i in range(retries):
-        df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
+        try:
+            if use_yahoo_api:
+                df = _download_from_yahoo_api(ticker, start, end)
+            else:
+                df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
+        except Exception:
+            df = None
         if df is not None and not df.empty:
             return df
         time.sleep(1)
@@ -258,37 +312,40 @@ def _normalize_stock_frame(df):
 
 def _resolve_window_model_path(model_folder, ticker, window_start, window_end):
     root = Path(model_folder)
+
     window_start_str = pd.Timestamp(window_start).strftime("%Y%m%d")
-    window_end_str = pd.Timestamp(window_end).strftime("%Y%m%d")
+    window_end_inclusive_str = (
+        pd.Timestamp(window_end) - pd.Timedelta(days=1)
+    ).strftime("%Y%m%d")
 
     def _candidate_files(base: Path):
         if not base.exists():
             return []
-        return list(base.glob(f"{ticker}_*.h5")) + list(base.glob(f"{ticker}_*.keras"))
+        return list(base.glob(f"{ticker}_*.h5")) + \
+               list(base.glob(f"{ticker}_*.keras"))
 
-    candidates = []
+    candidates = _candidate_files(root / ticker)
 
-    # 1) Preferred layout: model_folder/ticker/*.h5
-    ticker_dir = root / ticker
-    candidates.extend(_candidate_files(ticker_dir))
-
-    # 2) Recursive search under the whole model tree
     if not candidates and root.exists():
-        candidates = list(root.rglob(f"{ticker}_*.h5")) + list(root.rglob(f"{ticker}_*.keras"))
+        candidates = list(root.rglob(f"{ticker}_*.h5")) + \
+                     list(root.rglob(f"{ticker}_*.keras"))
 
     if not candidates:
         return None
 
-    # Prefer the exact window match if available.
-    exact_matches = [
-        p for p in candidates
-        if window_start_str in p.name and window_end_str in p.name
-    ]
-    if exact_matches:
-        candidates = exact_matches
+    expected_prefix = (
+        f"{ticker}_{window_start_str}_{window_end_inclusive_str}"
+    )
 
-    candidates = sorted(set(candidates))
-    return candidates[-1]
+    exact_matches = [
+        path for path in candidates
+        if path.stem.startswith(expected_prefix)
+    ]
+
+    if not exact_matches:
+        return None
+
+    return sorted(set(exact_matches))[-1]
 
 
 def _prepare_window_sequences(df, sequence_length, train_start, train_end, test_start, test_end):

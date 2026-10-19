@@ -84,12 +84,15 @@ def _resolve_data_folder(project_root, data_folder):
     return data_path if data_path.is_absolute() else Path(project_root) / data_path
 
 
-def _load_period_frame(ticker, project_root, data_folder, data_start, simulation_start, simulation_end):
+def _load_period_frame(ticker, project_root, data_folder, data_start, simulation_start, simulation_end, use_yahoo_api=False):
     resolved_data_folder = _resolve_data_folder(project_root, data_folder)
     download_start = pd.Timestamp(data_start or simulation_start).normalize()
     download_end = pd.Timestamp(simulation_end).normalize() + pd.Timedelta(days=1)
 
-    df = safe_download(ticker, str(download_start.date()), str(download_end.date()))
+    df = safe_download(
+        ticker, str(download_start.date()), str(download_end.date()),
+        use_yahoo_api=use_yahoo_api,
+    )
     if df is None or df.empty:
         csv_path = Path(resolved_data_folder) / "stock_data" / f"{ticker}_data.csv"
         if not csv_path.exists():
@@ -115,6 +118,7 @@ def _preprocess_ticker_for_period(
     simulation_start,
     simulation_end,
     data_start=None,
+    use_yahoo_api=False,
 ):
     df = _load_period_frame(
         ticker=ticker,
@@ -123,6 +127,7 @@ def _preprocess_ticker_for_period(
         data_start=data_start,
         simulation_start=simulation_start,
         simulation_end=simulation_end,
+        use_yahoo_api=use_yahoo_api,
     )
 
     required_cols = ["open", "high", "low", "close", "volume"]
@@ -204,6 +209,7 @@ def preprocess_ticker_from_csv(
     simulation_start=None,
     simulation_end=None,
     data_start=None,
+    use_yahoo_api=False,
 ):
     if simulation_start is not None and simulation_end is not None:
         return _preprocess_ticker_for_period(
@@ -214,6 +220,7 @@ def preprocess_ticker_from_csv(
             simulation_start=simulation_start,
             simulation_end=simulation_end,
             data_start=data_start,
+            use_yahoo_api=use_yahoo_api,
         )
 
     resolved_data_folder = _resolve_data_folder(project_root, data_folder)
@@ -242,6 +249,7 @@ def get_ticker_data(
     simulation_start=None,
     simulation_end=None,
     data_start=None,
+    use_yahoo_api=False,
 ):
     key = (
         ticker,
@@ -250,6 +258,7 @@ def get_ticker_data(
         str(pd.Timestamp(simulation_start).normalize()) if simulation_start is not None else None,
         str(pd.Timestamp(simulation_end).normalize()) if simulation_end is not None else None,
         str(pd.Timestamp(data_start).normalize()) if data_start is not None else None,
+        use_yahoo_api,
     )
     if key not in _DATA_CACHE:
         _DATA_CACHE[key] = preprocess_ticker_from_csv(
@@ -260,6 +269,7 @@ def get_ticker_data(
             simulation_start=simulation_start,
             simulation_end=simulation_end,
             data_start=data_start,
+            use_yahoo_api=use_yahoo_api,
         )
     return _DATA_CACHE[key]
 
@@ -298,6 +308,7 @@ def _quarterly_ticker_cache_key(
     train_mode,
     train_window_months,
     data_folder,
+    use_yahoo_api=False,
 ):
     return (
         ticker,
@@ -310,6 +321,7 @@ def _quarterly_ticker_cache_key(
         months,
         train_mode,
         train_window_months,
+        use_yahoo_api,
     )
 
 
@@ -325,6 +337,7 @@ def _build_quarterly_ticker_data(
     train_mode="cumulative",
     train_window_months=3,
     data_folder="data/20_years",
+    use_yahoo_api=False,
 ):
 
     resolved_data_folder = _resolve_quarterly_data_folder(project_root, data_folder)
@@ -332,6 +345,7 @@ def _build_quarterly_ticker_data(
         ticker,
         str(pd.Timestamp(data_start).normalize().date() if data_start is not None else pd.Timestamp(simulation_start).normalize().date()),
         str((pd.Timestamp(simulation_end).normalize() + pd.Timedelta(days=1)).date()),
+        use_yahoo_api=use_yahoo_api,
     )
     if df is None or df.empty:
         csv_path = Path(resolved_data_folder) / "stock_data" / f"{ticker}_data.csv"
@@ -432,6 +446,7 @@ def get_quarterly_ticker_data(
     train_mode="cumulative",
     train_window_months=3,
     data_folder="data/20_years",
+    use_yahoo_api=False,
 ):
     key = _quarterly_ticker_cache_key(
         ticker,
@@ -445,6 +460,7 @@ def get_quarterly_ticker_data(
         train_mode,
         train_window_months,
         data_folder,
+        use_yahoo_api,
     )
     if key not in _QUARTERLY_TICKER_CACHE:
         _QUARTERLY_TICKER_CACHE[key] = _build_quarterly_ticker_data(
@@ -459,6 +475,7 @@ def get_quarterly_ticker_data(
             train_mode=train_mode,
             train_window_months=train_window_months,
             data_folder=data_folder,
+            use_yahoo_api=use_yahoo_api,
         )
     return _QUARTERLY_TICKER_CACHE[key]
 
@@ -480,6 +497,7 @@ def predict_ticker(
     simulation_start=None,
     simulation_end=None,
     data_start=None,
+    use_yahoo_api=False,
 ):
     data = get_ticker_data(
         ticker,
@@ -489,6 +507,7 @@ def predict_ticker(
         simulation_start=simulation_start,
         simulation_end=simulation_end,
         data_start=data_start,
+        use_yahoo_api=use_yahoo_api,
     )
     X = data["X_test"] if X_override is None else X_override
     model = get_model(ticker, model_folder)
@@ -509,6 +528,7 @@ def get_predictions_and_actuals(
     months=3,
     train_mode="cumulative",
     train_window_months=3,
+    use_yahoo_api=False,
 ):  
     tickers = tuple(tickers)
     key = (
@@ -523,6 +543,7 @@ def get_predictions_and_actuals(
         months,
         train_mode,
         train_window_months,
+        use_yahoo_api,
     )
     if key in _PREDICTION_CACHE:
         return _PREDICTION_CACHE[key]
@@ -545,6 +566,7 @@ def get_predictions_and_actuals(
                 train_mode=train_mode,
                 train_window_months=train_window_months,
                 data_folder=data_folder,
+                use_yahoo_api=use_yahoo_api,
             )
             predictions[ticker] = ticker_data["predictions"]
             actuals[ticker] = ticker_data["actuals"]
@@ -559,6 +581,7 @@ def get_predictions_and_actuals(
                 simulation_start=simulation_start,
                 simulation_end=simulation_end,
                 data_start=data_start,
+                use_yahoo_api=use_yahoo_api,
             )
             actuals[ticker] = get_ticker_data(
                 ticker,
@@ -568,6 +591,7 @@ def get_predictions_and_actuals(
                 simulation_start=simulation_start,
                 simulation_end=simulation_end,
                 data_start=data_start,
+                use_yahoo_api=use_yahoo_api,
             )["y_actual"]
 
     if predictions:
@@ -638,6 +662,12 @@ def attack_signal_day(attack_day, signal_shift=1):
     """
     return int(attack_day) + int(signal_shift)
 
+def volatility_perturbation(window_close_norm, k, vol_window=30):
+    '''Shift the last normalized close by k times the std of the last vol_window closes (paper: k = 2)'''
+    start = max(0, len(window_close_norm) - vol_window)
+    stdev = np.std(window_close_norm[start:])
+    return window_close_norm[-1] + k * stdev
+
 
 def evaluate_targeted_attack(
     setup,
@@ -657,6 +687,8 @@ def evaluate_targeted_attack(
     train_mode="single",
     train_window_months=3,
     diagnostics=False,
+    vol_window=30,
+    use_yahoo_api=False,
 ):
     ''' Evaluate one targeted attack by searching for a perturbation that forces the target signal'''
     mf = setup.model_folder(model_folders)
@@ -676,6 +708,7 @@ def evaluate_targeted_attack(
         months=months,
         train_mode=train_mode,
         train_window_months=train_window_months,
+        use_yahoo_api=use_yahoo_api,
     )
     signals_base = setup.strategy(predictions_base, actuals)
     eval_day = attack_signal_day(attack_day)
@@ -690,6 +723,8 @@ def evaluate_targeted_attack(
         "attack_day": attack_day,
         "target_signal": target_signal,
         "target_label": SIGNAL_LABELS[target_signal],
+        "vol_window":vol_window,
+        
     }
 
     # Skip invalid attack days
@@ -726,6 +761,7 @@ def evaluate_targeted_attack(
             train_mode=train_mode,
             train_window_months=train_window_months,
             data_folder=data_folder,
+            use_yahoo_api=use_yahoo_api,
         )
         segment, local_attack_day = _segment_for_attack_day(quarterly_data["segments"], attack_day)
         if segment is None:
@@ -754,6 +790,7 @@ def evaluate_targeted_attack(
             simulation_start=simulation_start,
             simulation_end=simulation_end,
             data_start=data_start,
+            use_yahoo_api=use_yahoo_api,
         )
         X_original = data["X_test"]
         baseline_attacked_pred = predictions_base[setup.attacked_ticker]
@@ -773,8 +810,8 @@ def evaluate_targeted_attack(
                 attacked_pred_window = segment["predictions"]
             else:
                 attacked_X = X_original.copy()
-                attacked_X[local_attack_day, -1, CLOSE_FEATURE_INDEX] = np.clip(
-                    attacked_X[local_attack_day, -1, CLOSE_FEATURE_INDEX] + delta, 0.0, 1.0
+                attacked_X[local_attack_day, -1, CLOSE_FEATURE_INDEX] = volatility_perturbation(
+                    attacked_X[local_attack_day, :, CLOSE_FEATURE_INDEX], delta, vol_window
                 )
                 attacked_model = get_model_by_path(segment["model_path"])
                 attacked_pred_scaled = attacked_model.predict(attacked_X, verbose=0).reshape(-1)
@@ -801,8 +838,8 @@ def evaluate_targeted_attack(
             else:
                 attacked_X = X_original.copy()
                 # Perturb only the last "close" value of the attacked input window
-                attacked_X[attack_day, -1, CLOSE_FEATURE_INDEX] = np.clip(
-                    attacked_X[attack_day, -1, CLOSE_FEATURE_INDEX] + delta, 0.0, 1.0
+                attacked_X[attack_day, -1, CLOSE_FEATURE_INDEX] = volatility_perturbation(
+                    attacked_X[attack_day, :, CLOSE_FEATURE_INDEX], delta, vol_window
                 )
 
                 attacked_pred = predict_ticker(
@@ -815,6 +852,7 @@ def evaluate_targeted_attack(
                     simulation_start=simulation_start,
                     simulation_end=simulation_end,
                     data_start=data_start,
+                    use_yahoo_api=use_yahoo_api,
                 )
 
         # Replace the target ticker's baseline predictions with adversarial ones
@@ -899,6 +937,8 @@ def run_targeted_attack_experiment(
     train_mode="cumulative",
     train_window_months=3,
     diagnostics=False,
+    vol_window=30,
+    use_yahoo_api=False,
 ):
     rows = []
     attack_days = list(attack_days)
@@ -926,6 +966,8 @@ def run_targeted_attack_experiment(
                     train_mode=train_mode,
                     train_window_months=train_window_months,
                     diagnostics=diagnostics,
+                    vol_window=vol_window,
+                    use_yahoo_api=use_yahoo_api,
                 )
                 row["objective"] = objective_name
                 row["timing_policy"] = timing_policy
@@ -1001,6 +1043,7 @@ def candidate_attack_days(
     months=3,
     train_mode="cumulative",
     train_window_months=3,
+    use_yahoo_api=False,
 ):
     '''Return the valid day indices that can be considered for launching an attack'''
     predictions, actuals = get_predictions_and_actuals(
@@ -1016,6 +1059,7 @@ def candidate_attack_days(
         months=months,
         train_mode=train_mode,
         train_window_months=train_window_months,
+        use_yahoo_api=use_yahoo_api,
     )
     signals = setup.strategy(predictions, actuals)
     upper = min(len(signals[setup.attacked_ticker]), len(predictions[setup.attacked_ticker])) - 1
@@ -1040,6 +1084,7 @@ def timing_scores_for_setup(
     months=3,
     train_mode="cumulative",
     train_window_months=3,
+    use_yahoo_api=False,
 ):
     '''Compute timing-related metrics used to rank candidate attack days for one setup'''
     predictions, actuals = get_predictions_and_actuals(
@@ -1055,6 +1100,7 @@ def timing_scores_for_setup(
         months=months,
         train_mode=train_mode,
         train_window_months=train_window_months,
+        use_yahoo_api=use_yahoo_api,
     )
     ticker = setup.attacked_ticker
     days = candidate_attack_days(
@@ -1071,6 +1117,7 @@ def timing_scores_for_setup(
         months=months,
         train_mode=train_mode,
         train_window_months=train_window_months,
+        use_yahoo_api=use_yahoo_api,
     )
 
     actual = actuals[ticker]
@@ -1111,6 +1158,7 @@ def select_attack_days_by_policy(
     months=3,
     train_mode="cumulative",
     train_window_months=3,
+    use_yahoo_api=False,
 ):
     '''Select attack days according to the requested timing policy and ranking criterion'''
     scores = timing_scores_for_setup(
@@ -1127,6 +1175,7 @@ def select_attack_days_by_policy(
         months=months,
         train_mode=train_mode,
         train_window_months=train_window_months,
+        use_yahoo_api=use_yahoo_api,
     )
 
     if policy == "uniform":
@@ -1170,6 +1219,7 @@ def build_attack_day_plan(
     months=3,
     train_mode="cumulative",
     train_window_months=3,
+    use_yahoo_api=False,
 ):
     '''Build a mapping from each setup-policy pair to its selected attack days'''
     plan = {}
@@ -1185,6 +1235,7 @@ def build_attack_day_plan(
                 months=months,
                 train_mode=train_mode,
                 train_window_months=train_window_months,
+                use_yahoo_api=use_yahoo_api,
             )
     return plan
 

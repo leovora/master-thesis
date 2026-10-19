@@ -42,12 +42,21 @@ def _drop_repeated_header_row(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-def load_ticker_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+def load_ticker_data(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    use_yahoo_api: bool = False,
+) -> pd.DataFrame:
     """
     Fetch data for a given ticker from Yahoo Finance.
     """
     try:
-        df = yf.download(ticker, start=start_date, end=end_date)
+        if use_yahoo_api:
+            from notebooks.utils import _download_from_yahoo_api
+            df = _download_from_yahoo_api(ticker, start_date, end_date)
+        else:
+            df = yf.download(ticker, start=start_date, end=end_date)
         time.sleep(1.2)
         return _normalize_columns(df)
     except Exception as e:
@@ -169,7 +178,13 @@ def preprocess_transformer_data(df: pd.DataFrame, sequence_length: int, train_sp
 
     return (X_train_seq, y_train_seq, X_test_seq, y_test_seq, y_min, y_max, x_min, x_max)
 
-def save_data_to_csv(tickers: list, start_date: str, end_date: str, data_folder: str = "data"):
+def save_data_to_csv(
+    tickers: list,
+    start_date: str,
+    end_date: str,
+    data_folder: str = "data",
+    use_yahoo_api: bool = False,
+):
     """
     Save data for multiple tickers to CSV.
     """
@@ -185,7 +200,12 @@ def save_data_to_csv(tickers: list, start_date: str, end_date: str, data_folder:
             continue
 
         print(f"Fetching and saving data for {ticker}")
-        df = load_ticker_data(ticker, start_date, end_date)
+        df = load_ticker_data(
+            ticker,
+            start_date,
+            end_date,
+            use_yahoo_api=use_yahoo_api,
+        )
         if not df.empty:
             df = _normalize_columns(df)
             df.to_csv(csv_path, index=False)
