@@ -2,6 +2,7 @@ import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 import time
+import requests
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -212,104 +213,65 @@ def preprocess_data_transformer(ticker, start_date, end_date, sequence_length, s
     # to the correct base day without introducing a one-step shift.
     return (X_train_seq, y_train_seq, X_test_seq, y_test_seq, y_scaler, close_prices)
     
-# Explicit curl_cffi browser profiles to try, in order. yfinance's default
-# ("chrome" -> latest alias) can resolve to a profile the installed libcurl
-# build does not support (e.g. "Impersonating chrome150 is not supported").
-IMPERSONATE_PROFILES = ["chrome124", "chrome120", "chrome116", "chrome110", "safari17_0", "chrome"]
-_UNSET = object()
-_yf_session = _UNSET
+def _download_from_yahoo_api(ticker, start, end, timeout=30):
+    """Download daily OHLCV data directly from Yahoo Finance's chart API."""
+    period1 = int(pd.Timestamp(start, tz="UTC").timestamp())
+    period2 = int(pd.Timestamp(end, tz="UTC").timestamp())
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    response = requests.get(
+        url,
+        params={
+            "period1": period1,
+            "period2": period2,
+            "interval": "1d",
+            "events": "history",
+            "includeAdjustedClose": "true",
+        },
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    chart = payload.get("chart", {})
+    if chart.get("error"):
+        raise RuntimeError(chart["error"])
+
+    results = chart.get("result") or []
+    if not results:
+        return pd.DataFrame()
+
+    result = results[0]
+    timestamps = result.get("timestamp") or []
+    quote = (result.get("indicators", {}).get("quote") or [{}])[0]
+    if not timestamps:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(
+        {
+            "open": quote.get("open", []),
+            "high": quote.get("high", []),
+            "low": quote.get("low", []),
+            "close": quote.get("close", []),
+            "volume": quote.get("volume", []),
+        },
+        index=pd.to_datetime(timestamps, unit="s", utc=True).tz_localize(None),
+    )
+    frame.index.name = "date"
+    return frame.dropna(subset=["open", "high", "low", "close"])
 
 
-def _get_yf_session():
-    """Return a curl_cffi session with a working impersonation profile, or None
-    if curl_cffi cannot impersonate any browser in this environment. Probed once."""
-    global _yf_session
-    if _yf_session is not _UNSET:
-        return _yf_session
-    _yf_session = None
-    try:
-        from curl_cffi import requests as cffi_requests
-    except Exception as e:
-        print(f"[yfinance] curl_cffi not importable: {e}")
-        return None
-    for profile in IMPERSONATE_PROFILES:
-        try:
-            session = cffi_requests.Session(impersonate=profile)
-        except Exception:
-            continue
-        try:
-            session.get("https://query1.finance.yahoo.com", timeout=10)
-        except Exception as e:
-            if "mpersonat" in str(e):
-                continue
-            # Network/HTTP error unrelated to impersonation: the profile itself works.
-        print(f"[yfinance] using browser profile: {profile}")
-        _yf_session = session
-        return session
-    print("[yfinance] curl_cffi cannot impersonate any browser here; "
-          "falling back to the Yahoo chart API via requests")
-    return None
-
-
-def _download_yahoo_chart(ticker, start, end):
-    """Fetch daily OHLCV straight from Yahoo's chart API (no curl_cffi needed).
-    Returns a frame shaped like yf.download(..., auto_adjust=False)."""
-    import requests
-    params = {
-        "period1": int(pd.Timestamp(start, tz="UTC").timestamp()),
-        "period2": int(pd.Timestamp(end, tz="UTC").timestamp()),
-        "interval": "1d",
-        "events": "div,splits",
-        "includeAdjustedClose": "true",
-    }
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
-    for host in ("query1", "query2"):
-        try:
-            resp = requests.get(f"https://{host}.finance.yahoo.com/v8/finance/chart/{ticker}",
-                                params=params, headers=headers, timeout=20)
-            resp.raise_for_status()
-            result = resp.json()["chart"]["result"][0]
-        except Exception as e:
-            print(f"[yahoo-chart] {host} failed for {ticker}: {e}")
-            continue
-        if not result.get("timestamp"):
-            return None
-        quote = result["indicators"]["quote"][0]
-        adjclose = result["indicators"].get("adjclose", [{}])[0].get("adjclose", quote["close"])
-        tz = result.get("meta", {}).get("exchangeTimezoneName", "America/New_York")
-        index = (pd.to_datetime(result["timestamp"], unit="s", utc=True)
-                 .tz_convert(tz).normalize().tz_localize(None))
-        df = pd.DataFrame({
-            "Open": quote["open"],
-            "High": quote["high"],
-            "Low": quote["low"],
-            "Close": quote["close"],
-            "Adj Close": adjclose,
-            "Volume": quote["volume"],
-        }, index=pd.DatetimeIndex(index, name="Date"))
-        return df.dropna(subset=["Close"])
-    return None
-
-
-def safe_download(ticker, start, end, retries=3):
-    session = _get_yf_session()
+def safe_download(ticker, start, end, retries=3, use_yahoo_api=False):
     for i in range(retries):
-        if session is not None:
-            try:
-                df = yf.download(ticker, start=start, end=end, progress=False,
-                                 auto_adjust=False, session=session)
-            except Exception as e:
-                print(f"[yfinance] download failed for {ticker}: {e}")
-                df = None
-        else:
-            df = _download_yahoo_chart(ticker, start, end)
+        try:
+            if use_yahoo_api:
+                df = _download_from_yahoo_api(ticker, start, end)
+            else:
+                df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=False)
+        except Exception:
+            df = None
         if df is not None and not df.empty:
             return df
         time.sleep(1)
-    # yfinance returned nothing even with a working session: try the direct API once.
-    if session is not None:
-        return _download_yahoo_chart(ticker, start, end)
     return None
 
 
@@ -350,35 +312,41 @@ def _normalize_stock_frame(df):
 
 def _resolve_window_model_path(model_folder, ticker, window_start, window_end):
     root = Path(model_folder)
+
     window_start_str = pd.Timestamp(window_start).strftime("%Y%m%d")
-    window_end_str = pd.Timestamp(window_end).strftime("%Y%m%d")
+    window_end_inclusive_str = (
+        pd.Timestamp(window_end) - pd.Timedelta(days=1)
+    ).strftime("%Y%m%d")
 
     def _candidate_files(base: Path):
         if not base.exists():
             return []
-        return list(base.glob(f"{ticker}_*.h5")) + list(base.glob(f"{ticker}_*.keras"))
+        return list(base.glob(f"{ticker}_*.h5")) + \
+               list(base.glob(f"{ticker}_*.keras"))
 
-    candidates = []
+    candidates = _candidate_files(root / ticker)
 
-    # 1) Preferred layout: model_folder/ticker/*.h5
-    ticker_dir = root / ticker
-    candidates.extend(_candidate_files(ticker_dir))
-
-    # 2) Recursive search under the whole model tree
     if not candidates and root.exists():
-        candidates = list(root.rglob(f"{ticker}_*.h5")) + list(root.rglob(f"{ticker}_*.keras"))
+        candidates = list(root.rglob(f"{ticker}_*.h5")) + \
+                     list(root.rglob(f"{ticker}_*.keras"))
 
     if not candidates:
         return None
 
-    # Prefer the exact window match if available.
+    expected_prefix = (
+        f"{ticker}_{window_start_str}_{window_end_inclusive_str}"
+    )
+
     exact_matches = [
-        p for p in candidates
-        if window_start_str in p.name and window_end_str in p.name
+        path for path in candidates
+        if path.stem.startswith(expected_prefix)
     ]
+
     if exact_matches:
         candidates = exact_matches
 
+    # Fallback: if no exact quarterly window exists, use the last
+    # available model.
     candidates = sorted(set(candidates))
     return candidates[-1]
 

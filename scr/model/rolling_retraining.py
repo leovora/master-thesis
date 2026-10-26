@@ -240,7 +240,7 @@ def train_and_save_rolling_quarterly_models(
     data_start = None,
     data_end = None,
     months = 3,
-    lookback_years = 3,
+    lookback_years = 5,
     model_folder = "models/LSTM_rolling",
     save_models = True,
     force_retrain = False,

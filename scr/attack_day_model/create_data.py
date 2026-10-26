@@ -117,6 +117,7 @@ def _run_attack_event_log(
     eval_cr_period,
     train_mode,
     train_window_months,
+    use_yahoo_api,
     ignore_already_target,
     resume,
     checkpoint_every,
@@ -186,6 +187,7 @@ def _run_attack_event_log(
             eval_cr_period=eval_cr_period,
             train_mode=train_mode,
             train_window_months=train_window_months,
+            use_yahoo_api=use_yahoo_api,
         )
         row["objective"] = objective_name
         row["timing_policy"] = timing_policy
@@ -255,6 +257,7 @@ def create_attack_event_log(
     eval_cr_period = 10,
     train_mode = "cumulative",
     train_window_months = 3,
+    use_yahoo_api = False,
     ignore_already_target = True,
     resume = True,
     checkpoint_every = 5,
@@ -294,6 +297,7 @@ def create_attack_event_log(
         eval_cr_period=eval_cr_period,
         train_mode=train_mode,
         train_window_months=train_window_months,
+        use_yahoo_api=use_yahoo_api,
         ignore_already_target=ignore_already_target,
         resume=resume,
         checkpoint_every=checkpoint_every,
@@ -321,6 +325,7 @@ def create_attack_event_log_for_plan(
     eval_cr_period = 10,
     train_mode = "cumulative",
     train_window_months = 3,
+    use_yahoo_api = False,
     ignore_already_target = True,
     resume = True,
     checkpoint_every = 1,
@@ -365,6 +370,7 @@ def create_attack_event_log_for_plan(
         eval_cr_period=eval_cr_period,
         train_mode=train_mode,
         train_window_months=train_window_months,
+        use_yahoo_api=use_yahoo_api,
         ignore_already_target=ignore_already_target,
         resume=resume,
         checkpoint_every=checkpoint_every,

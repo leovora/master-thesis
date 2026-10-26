@@ -1198,6 +1198,9 @@ def compute_summary_by_setup_and_timing(results):
     valid["success"] = valid["success"].astype(bool)
     valid["already_target"] = valid["already_target"].astype(bool)
     valid["nontrivial_success"] = valid["success"] & ~valid["already_target"]
+    valid["nontrivial_min_abs_delta_norm"] = valid["min_abs_delta_norm"].where(
+        valid["nontrivial_success"]
+    )
     
     has_cr_period = "delta_cumulative_return_in_period" in valid.columns
     if has_cr_period:
@@ -1210,8 +1213,8 @@ def compute_summary_by_setup_and_timing(results):
         "baseline_target_rate": ("already_target", "mean"),
         "nontrivial_trials": ("already_target", lambda x: int((~x).sum())),
         "nontrivial_successes": ("nontrivial_success", "sum"),
-        "mean_min_abs_delta_norm": ("min_abs_delta_norm", "mean"),
-        "median_min_abs_delta_norm": ("min_abs_delta_norm", "median"),
+        "mean_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "mean"),
+        "median_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "median"),
         "mean_delta_final_cr": ("delta_final_cr", "mean"),
     }
     
@@ -1251,6 +1254,9 @@ def compute_timing_summaries(results):
     valid["success"] = valid["success"].astype(bool)
     valid["already_target"] = valid["already_target"].astype(bool)
     valid["nontrivial_success"] = valid["success"] & ~valid["already_target"]
+    valid["nontrivial_min_abs_delta_norm"] = valid["min_abs_delta_norm"].where(
+        valid["nontrivial_success"]
+    )
     
     has_cr_period = "delta_cumulative_return_in_period" in valid.columns
     if has_cr_period:
@@ -1262,7 +1268,7 @@ def compute_timing_summaries(results):
         "nontrivial_attack_success_rate": ("nontrivial_success", "mean"),
         "baseline_target_rate": ("already_target", "mean"),
         "nontrivial_successes": ("nontrivial_success", "sum"),
-        "mean_min_abs_delta_norm": ("min_abs_delta_norm", "mean"),
+        "mean_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "mean"),
         "mean_abs_prediction_shift": ("prediction_shift", lambda x: np.nanmean(np.abs(x))),
         "mean_delta_cr": ("delta_final_cr", "mean"),
         "trials": ("success", "size"),
@@ -1290,7 +1296,7 @@ def compute_timing_summaries(results):
         "nontrivial_trials": ("already_target", lambda x: int((~x).sum())),
         "mean_delta_cr": ("delta_final_cr", "mean"),
         "nontrivial_successes": ("nontrivial_success", "sum"),
-        "mean_min_abs_delta_norm": ("min_abs_delta_norm", "mean"),
+        "mean_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "mean"),
     }
     
     if has_cr_period:
@@ -1330,6 +1336,9 @@ def compute_summary_by_setup(results):
     valid["nontrivial_success"] = (
         valid["success"] & ~valid["already_target"]
     )
+    valid["nontrivial_min_abs_delta_norm"] = valid["min_abs_delta_norm"].where(
+        valid["nontrivial_success"]
+    )
     
     has_cr_period = "delta_cumulative_return_in_period" in valid.columns
     if has_cr_period:
@@ -1342,8 +1351,8 @@ def compute_summary_by_setup(results):
         "baseline_target_rate": ("already_target", "mean"),
         "nontrivial_trials": ("already_target", lambda x: int((~x).sum())),
         "nontrivial_successes": ("nontrivial_success", "sum"),
-        "mean_min_abs_delta_norm": ("min_abs_delta_norm", "mean"),
-        "median_min_abs_delta_norm": ("min_abs_delta_norm", "median"),
+        "mean_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "mean"),
+        "median_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "median"),
         "mean_delta_final_cr": ("delta_final_cr", "mean"),
     }
     
