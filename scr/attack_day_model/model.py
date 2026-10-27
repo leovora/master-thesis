@@ -188,6 +188,110 @@ def build_model(
 
 
 # ---------------------------------------------------------------------------
+# Hyperparameter search
+# ---------------------------------------------------------------------------
+
+# Search spaces for RandomizedSearchCV. Keys refer to the "clf" step of the
+# pipeline built by build_model(). Lists are sampled uniformly.
+PARAM_DISTRIBUTIONS = {
+    "gradient_boosting": {
+        "clf__n_estimators":     [100, 200, 300, 500],
+        "clf__learning_rate":    [0.01, 0.03, 0.05, 0.1],
+        "clf__max_depth":        [2, 3, 4, 5],
+        "clf__subsample":        [0.6, 0.8, 1.0],
+        "clf__min_samples_leaf": [1, 10, 20, 50],
+    },
+    "random_forest": {
+        "clf__n_estimators":     [200, 300, 500],
+        "clf__max_depth":        [4, 6, 8, 12, None],
+        "clf__min_samples_leaf": [1, 5, 10, 20],
+        "clf__max_features":     ["sqrt", 0.3, 0.5],
+    },
+    "logistic_regression": {
+        "clf__C": [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0, 100.0],
+    },
+}
+
+
+def fit_params_for(model_type, imbalance_strategy, y) -> dict:
+    """
+    Extra fit() arguments for the pipeline: GradientBoosting has no
+    class_weight, so balanced sample weights are passed at fit time.
+    """
+    if (
+        model_type == "gradient_boosting"
+        and imbalance_strategy == ImbalanceStrategy.CLASS_WEIGHT
+    ):
+        return {"clf__sample_weight": compute_sample_weight("balanced", y)}
+    return {}
+
+
+def tune_model(
+    logger,
+    X: pd.DataFrame,
+    y: pd.Series,
+    model_type: str = "gradient_boosting",
+    imbalance_strategy: ImbalanceStrategy = ImbalanceStrategy.CLASS_WEIGHT,
+    n_iter: int = 20,
+    cv_folds: int = 5,
+    scoring: str = "average_precision",
+    random_state: int = 42,
+    n_jobs: int = -1,
+) -> dict:
+    """
+    Randomized hyperparameter search with a chronological cross-validation.
+
+    X and y must be in chronological order: TimeSeriesSplit always trains on
+    earlier rows and validates on later ones, so no future information is used
+    to choose the hyperparameters. Returns the best (refitted) pipeline, its
+    parameters and the cross-validated score of the best configuration.
+    """
+    from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
+
+    if model_type not in PARAM_DISTRIBUTIONS:
+        raise ValueError(f"No search space for model_type '{model_type}'.")
+
+    pipeline = build_model(
+        logger,
+        model_type=model_type,
+        imbalance_strategy=imbalance_strategy,
+        random_state=random_state,
+    )
+    space = PARAM_DISTRIBUTIONS[model_type]
+
+    # Do not ask for more iterations than distinct configurations
+    n_configs = int(np.prod([len(v) for v in space.values()]))
+    n_iter = min(n_iter, n_configs)
+
+    search = RandomizedSearchCV(
+        pipeline,
+        param_distributions=space,
+        n_iter=n_iter,
+        scoring=scoring,
+        cv=TimeSeriesSplit(n_splits=cv_folds),
+        random_state=random_state,
+        n_jobs=n_jobs,
+        refit=True,
+    )
+    search.fit(X, y, **fit_params_for(model_type, imbalance_strategy, y))
+
+    best = search.best_index_
+    cv_mean = float(search.cv_results_["mean_test_score"][best])
+    cv_std = float(search.cv_results_["std_test_score"][best])
+    logger.info(
+        "Tuned %s / %s: CV %s = %.4f ± %.4f with %s",
+        model_type, imbalance_strategy.value, scoring, cv_mean, cv_std,
+        search.best_params_,
+    )
+    return {
+        "pipeline": search.best_estimator_,
+        "best_params": search.best_params_,
+        "cv_mean": cv_mean,
+        "cv_std": cv_std,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
 

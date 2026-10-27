@@ -1308,6 +1308,9 @@ def compute_timing_summaries(results):
     valid["nontrivial_min_abs_delta_norm"] = valid["min_abs_delta_norm"].where(
         valid["nontrivial_success"]
     )
+    valid["nontrivial_prediction_shift"] = valid["prediction_shift"].where(
+        valid["nontrivial_success"]
+    )
     
     has_cr_period = "delta_cumulative_return_in_period" in valid.columns
     if has_cr_period:
@@ -1320,7 +1323,7 @@ def compute_timing_summaries(results):
         "baseline_target_rate": ("already_target", "mean"),
         "nontrivial_successes": ("nontrivial_success", "sum"),
         "mean_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "mean"),
-        "mean_abs_prediction_shift": ("prediction_shift", lambda x: np.nanmean(np.abs(x))),
+        "mean_abs_prediction_shift": ("nontrivial_prediction_shift", lambda x: x.abs().mean()),
         "mean_delta_cr": ("delta_final_cr", "mean"),
         "trials": ("success", "size"),
     }
