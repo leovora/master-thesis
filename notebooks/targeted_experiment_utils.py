@@ -1252,6 +1252,13 @@ def compute_summary_by_setup_and_timing(results):
     valid["nontrivial_min_abs_delta_norm"] = valid["min_abs_delta_norm"].where(
         valid["nontrivial_success"]
     )
+    valid["nontrivial_delta_final_cr"] = valid["delta_final_cr"].where(
+        valid["nontrivial_success"]
+    )
+    if "delta_cumulative_return_in_period" in valid.columns:
+        valid["nontrivial_delta_cr_period"] = valid["delta_cumulative_return_in_period"].where(
+            valid["nontrivial_success"]
+        )
     
     has_cr_period = "delta_cumulative_return_in_period" in valid.columns
     if has_cr_period:
@@ -1266,14 +1273,15 @@ def compute_summary_by_setup_and_timing(results):
         "nontrivial_successes": ("nontrivial_success", "sum"),
         "mean_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "mean"),
         "median_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "median"),
-        "mean_delta_final_cr": ("delta_final_cr", "mean"),
+        "mean_delta_final_cr": ("nontrivial_delta_final_cr", "mean"),
+        "median_delta_final_cr": ("nontrivial_delta_final_cr", "median"),
     }
     
     if has_cr_period:
         agg_dict.update({
             "nontrivial_cr_success": ("nontrivial_cr_success", "sum"),
-            "mean_delta_cumulative_return_in_period": ("delta_cumulative_return_in_period", "mean"),
-            "median_delta_cumulative_return_in_period": ("delta_cumulative_return_in_period", "median"),
+            "mean_delta_cumulative_return_in_period": ("nontrivial_delta_cr_period", "mean"),
+            "median_delta_cumulative_return_in_period": ("nontrivial_delta_cr_period", "median"),
         })
 
     summary = (
@@ -1308,6 +1316,13 @@ def compute_timing_summaries(results):
     valid["nontrivial_min_abs_delta_norm"] = valid["min_abs_delta_norm"].where(
         valid["nontrivial_success"]
     )
+    valid["nontrivial_delta_final_cr"] = valid["delta_final_cr"].where(
+        valid["nontrivial_success"]
+    )
+    if "delta_cumulative_return_in_period" in valid.columns:
+        valid["nontrivial_delta_cr_period"] = valid["delta_cumulative_return_in_period"].where(
+            valid["nontrivial_success"]
+        )
     valid["nontrivial_prediction_shift"] = valid["prediction_shift"].where(
         valid["nontrivial_success"]
     )
@@ -1324,13 +1339,13 @@ def compute_timing_summaries(results):
         "nontrivial_successes": ("nontrivial_success", "sum"),
         "mean_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "mean"),
         "mean_abs_prediction_shift": ("nontrivial_prediction_shift", lambda x: x.abs().mean()),
-        "mean_delta_cr": ("delta_final_cr", "mean"),
+        "mean_delta_cr": ("nontrivial_delta_final_cr", "mean"),
         "trials": ("success", "size"),
     }
     
     if has_cr_period:
         timing_agg_dict["nontrivial_cr_success"] = ("nontrivial_cr_success", "sum")
-        timing_agg_dict["mean_delta_cumulative_return_in_period"] = ("delta_cumulative_return_in_period", "mean")
+        timing_agg_dict["mean_delta_cumulative_return_in_period"] = ("nontrivial_delta_cr_period", "mean")
 
     timing_summary = (
         valid.groupby(["timing_policy", "attack_day"], as_index=False).agg(**timing_agg_dict)
@@ -1348,14 +1363,14 @@ def compute_timing_summaries(results):
         "attack_success_rate": ("success", "mean"),
         "baseline_target_rate": ("already_target", "mean"),
         "nontrivial_trials": ("already_target", lambda x: int((~x).sum())),
-        "mean_delta_cr": ("delta_final_cr", "mean"),
+        "mean_delta_cr": ("nontrivial_delta_final_cr", "mean"),
         "nontrivial_successes": ("nontrivial_success", "sum"),
         "mean_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "mean"),
     }
     
     if has_cr_period:
         policy_agg_dict["nontrivial_cr_success"] = ("nontrivial_cr_success", "sum")
-        policy_agg_dict["mean_delta_cumulative_return_in_period"] = ("delta_cumulative_return_in_period", "mean")
+        policy_agg_dict["mean_delta_cumulative_return_in_period"] = ("nontrivial_delta_cr_period", "mean")
 
     policy_summary = (
         valid.groupby("timing_policy", as_index=False).agg(**policy_agg_dict)
@@ -1393,6 +1408,13 @@ def compute_summary_by_setup(results):
     valid["nontrivial_min_abs_delta_norm"] = valid["min_abs_delta_norm"].where(
         valid["nontrivial_success"]
     )
+    valid["nontrivial_delta_final_cr"] = valid["delta_final_cr"].where(
+        valid["nontrivial_success"]
+    )
+    if "delta_cumulative_return_in_period" in valid.columns:
+        valid["nontrivial_delta_cr_period"] = valid["delta_cumulative_return_in_period"].where(
+            valid["nontrivial_success"]
+        )
     
     has_cr_period = "delta_cumulative_return_in_period" in valid.columns
     if has_cr_period:
@@ -1407,14 +1429,15 @@ def compute_summary_by_setup(results):
         "nontrivial_successes": ("nontrivial_success", "sum"),
         "mean_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "mean"),
         "median_min_abs_delta_norm": ("nontrivial_min_abs_delta_norm", "median"),
-        "mean_delta_final_cr": ("delta_final_cr", "mean"),
+        "mean_delta_final_cr": ("nontrivial_delta_final_cr", "mean"),
+        "median_delta_final_cr": ("nontrivial_delta_final_cr", "median"),
     }
     
     if has_cr_period:
         agg_dict.update({
             "nontrivial_cr_success": ("nontrivial_cr_success", "sum"),
-            "mean_delta_cumulative_return_in_period": ("delta_cumulative_return_in_period", "mean"),
-            "median_delta_cumulative_return_in_period": ("delta_cumulative_return_in_period", "median"),
+            "mean_delta_cumulative_return_in_period": ("nontrivial_delta_cr_period", "mean"),
+            "median_delta_cumulative_return_in_period": ("nontrivial_delta_cr_period", "median"),
         })
 
     summary = (
