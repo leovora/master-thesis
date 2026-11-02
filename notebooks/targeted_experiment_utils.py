@@ -652,15 +652,29 @@ def signal_at(signals, ticker, attack_day):
     return int(ticker_signals[attack_day])
 
 
-def attack_signal_day(attack_day, signal_shift=1):
-    """
-    Map an attack day to the trading-signal index that actually reflects it.
+# Position, in the signal series returned by each strategy, of the first signal
+# computed with the prediction of a given day as its most recent value.
+#
+# The strategies in scr.trade.trading_strategy build their signals with "valid"
+# windows, so the signal series is shorter than the prediction series and its
+# index i is NOT the index of the predictions. With the default parameters:
+#   MA  (5/20 days):  signal[i] uses the predictions up to index i + 18
+#   BB  (20 days):    signal[i] uses the prediction at index i + 18
+#   ROC (14 days):    signal[i] uses the predictions up to index i + 13
+# (each strategy also shifts its signal by one step). A perturbation of the
+# prediction of day d therefore first affects the signal at index d - offset.
+SIGNAL_OFFSETS = {"MA": 18, "BB": 18, "ROC": 13}
 
-    The MA/ROC/BB strategies in scr.trade.trading_strategy are shifted by one
-    step to avoid lookahead bias, so the effect of a perturbation applied at
-    day d is evaluated on the signal at day d + 1.
+
+def attack_signal_day(attack_day, strategy_name):
     """
-    return int(attack_day) + int(signal_shift)
+    Map an attack day (index of the attacked prediction) to the index of the
+    signal that is computed with that prediction as its most recent value.
+    """
+    if strategy_name not in SIGNAL_OFFSETS:
+        raise ValueError(f"Unknown strategy for signal alignment: {strategy_name}")
+    return int(attack_day) - SIGNAL_OFFSETS[strategy_name]
+
 
 def volatility_perturbation(window_close_norm, k, vol_window=30):
     '''Shift the last normalized close by k times the std of the last vol_window closes (paper: k = 2)'''
@@ -711,7 +725,7 @@ def evaluate_targeted_attack(
         use_yahoo_api=use_yahoo_api,
     )
     signals_base = setup.strategy(predictions_base, actuals)
-    eval_day = attack_signal_day(attack_day)
+    eval_day = attack_signal_day(attack_day, setup.strategy_name)
     baseline_signal = signal_at(signals_base, setup.attacked_ticker, eval_day)
 
     _base_row = {
@@ -867,15 +881,17 @@ def evaluate_targeted_attack(
             # Store the first successful delta
             attacked_returns = simulate_trades_with_allocation(predictions_attack, actuals, signals_attack)
             
-            # Calculate cumulative return in period from attack day to end
+            # Cumulative return over eval_cr_period days starting from the
+            # forced signal. Portfolio returns are indexed like the signals,
+            # so the window starts at eval_day, not at attack_day.
             baseline_cr_period = cumulative_return_in_period(
                 baseline_returns, 
-                attack_day, 
+                eval_day, 
                 eval_cr_period
             )
             attacked_cr_period = cumulative_return_in_period(
                 attacked_returns, 
-                attack_day, 
+                eval_day, 
                 eval_cr_period
             )
             delta_cr_period = attacked_cr_period - baseline_cr_period
@@ -1004,29 +1020,46 @@ def _ma_decision_boundary_distance(predictions, short_window = 5, long_window = 
     long_mavg = np.convolve(predictions, np.ones(long_window), "valid") / long_window
     mavg_diff = short_mavg[long_window - short_window :] - long_mavg
     shifted = np.minimum(np.abs(mavg_diff - threshold), np.abs(mavg_diff + threshold))
-    shifted = np.pad(shifted, (1, 0), "constant")[:-1] # Shift the signal by 1 to avoid lookahead bias
+    shifted = np.pad(shifted, (1, 0), "constant", constant_values=np.nan)[:-1] # Same one-step shift as the strategy
     distance[: len(shifted)] = shifted
     return distance
 
 
-def _roc_decision_boundary_distance(predictions, window = 20, threshold = 0.01):
-    '''Distance from the closest ROC decision threshold for each signal index'''
-    roc = _rate_of_change(predictions, window)
-    valid = ~np.isnan(roc)
+def _roc_decision_boundary_distance(predictions, window = 14, threshold = 0.01):
+    '''Distance from the closest ROC decision threshold for each signal index.
+    Built exactly as rate_of_change_strategy (same window, same indexing and
+    one-step shift), so index i refers to the same decision as signal[i].'''
+    predictions = np.asarray(predictions, dtype=float)
     distance = np.full(len(predictions), np.nan)
+    if len(predictions) <= window:
+        return distance
+    base = np.where(predictions[:-window] == 0, np.nan, predictions[:-window])
+    roc = (predictions[window:] - predictions[:-window]) / base
     shifted = np.minimum(np.abs(roc - threshold), np.abs(roc + threshold))
-    distance[valid] = shifted[valid]
+    shifted = np.pad(shifted, (1, 0), "constant", constant_values=np.nan)[:-1]  # same shift as the strategy
+    distance[: len(shifted)] = shifted
     return distance
 
 
-def _bollinger_decision_boundary_distance(predictions, window = 20, num_std = 2):
-    """Distance from the closest BB decision threshold for each signal index"""
-    series = pd.Series(predictions)
-    rolling_mean = series.rolling(window).mean()
-    rolling_std = series.rolling(window).std()
+def _bollinger_decision_boundary_distance(predictions, actuals, window = 20, num_std = 2):
+    """Distance of the prediction from the closest Bollinger band for each signal index.
+    Built exactly as rolling_std_deviation_strategy: bands on the actual closes
+    (population std), prediction trimmed by window - 1, one-step shift."""
+    predictions = np.asarray(predictions, dtype=float)
+    actuals = np.asarray(actuals, dtype=float)
+    distance = np.full(len(predictions), np.nan)
+    if len(actuals) < window:
+        return distance
+    rolling_mean = np.convolve(actuals, np.ones(window), "valid") / window
+    rolling_std = np.std(np.lib.stride_tricks.sliding_window_view(actuals, window), axis=1)
     upper = rolling_mean + num_std * rolling_std
     lower = rolling_mean - num_std * rolling_std
-    return np.minimum(np.abs(series - upper), np.abs(series - lower)).to_numpy()
+    trimmed_pred = predictions[window - 1:]
+    n = min(len(trimmed_pred), len(upper))
+    dist = np.minimum(np.abs(trimmed_pred[:n] - upper[:n]), np.abs(trimmed_pred[:n] - lower[:n]))
+    shifted = np.pad(dist, (1, 0), "constant", constant_values=np.nan)[:-1]  # same shift as the strategy
+    distance[: len(shifted)] = shifted
+    return distance
 
 
 def candidate_attack_days(
@@ -1062,7 +1095,10 @@ def candidate_attack_days(
         use_yahoo_api=use_yahoo_api,
     )
     signals = setup.strategy(predictions, actuals)
-    upper = min(len(signals[setup.attacked_ticker]), len(predictions[setup.attacked_ticker])) - 1
+    # A day d is a candidate if its prediction exists and the signal that first
+    # uses it, at index attack_signal_day(d), exists in the signal series.
+    offset = SIGNAL_OFFSETS[setup.strategy_name]
+    upper = min(len(signals[setup.attacked_ticker]) + offset, len(predictions[setup.attacked_ticker]))
     if max_day is not None:
         upper = min(upper, max_day)
     return np.arange(min_day, upper)
@@ -1122,7 +1158,7 @@ def timing_scores_for_setup(
 
     actual = actuals[ticker]
     pred = predictions[ticker]
-    signal_days = days + 1
+    signal_days = np.array([attack_signal_day(d, setup.strategy_name) for d in days], dtype=int)
 
     scores = pd.DataFrame({"attack_day": days})
     scores["actual_volatility"] = _rolling_std(actual, volatility_window)[days]
@@ -1137,7 +1173,7 @@ def timing_scores_for_setup(
         scores["strategy_boundary_distance"] = _roc_decision_boundary_distance(pred)[signal_days]
 
     elif setup.strategy_name == "BB":
-        scores["strategy_boundary_distance"] = _bollinger_decision_boundary_distance(pred)[signal_days]
+        scores["strategy_boundary_distance"] = _bollinger_decision_boundary_distance(pred, actual)[signal_days]
 
     return scores
 
