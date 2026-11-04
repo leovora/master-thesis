@@ -125,20 +125,18 @@ def _clean_price_frame(df: pd.DataFrame, start_date: str | None = None) -> pd.Da
 
 
 def _download_price_history(ticker: str, start_date: str, end_date: str) -> pd.DataFrame | None:
-    """Download OHLCV data from Yahoo Finance if available."""
+    """Download OHLCV data from Yahoo Finance's chart API."""
     try:
-        import yfinance as yf
+        from notebooks.utils import _download_from_yahoo_api
     except Exception:
         return None
 
     try:
         end_ts = pd.Timestamp(end_date).normalize() + pd.Timedelta(days=1)
-        df = yf.download(
+        df = _download_from_yahoo_api(
             ticker,
-            start=str(pd.Timestamp(start_date).normalize().date()),
-            end=str(end_ts.date()),
-            progress=False,
-            auto_adjust=False,
+            str(pd.Timestamp(start_date).normalize().date()),
+            str(end_ts.date()),
         )
         if df is None or df.empty:
             return None
